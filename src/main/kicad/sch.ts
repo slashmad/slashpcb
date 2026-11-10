@@ -103,9 +103,9 @@ export function parseSchematic(rootFile: string, projectDir: string): SchematicM
   const legacyRefs = new Map<string, { ref: string; unit: number }>();
   for (const p of children(child(rootTree, "symbol_instances"), "path")) legacyRefs.set(String(p[1]), { ref: str(p, "reference") ?? "", unit: num(p, "unit") ?? 1 });
 
-  const walk = (abs: string, tree: SList, path: string, name: string, chain: string, depth: number, page?: string) => {
+  const walk = (abs: string, tree: SList, path: string, name: string, chain: string, depth: number, page?: string, parent?: string, box?: [number, number, number, number]) => {
     const pp = paper(tree);
-    sheets.push({ path, name, file: rel(abs), paper: pp.name, w: pp.w, h: pp.h, svg: null, page });
+    sheets.push({ path, name, file: rel(abs), paper: pp.name, w: pp.w, h: pp.h, svg: null, page, parent, box });
     const libs = new Map<string, SList>();
     for (const l of children(child(tree, "lib_symbols"), "symbol")) libs.set(String(l[1]), l);
     for (const s of children(tree, "symbol")) {
@@ -136,7 +136,7 @@ export function parseSchematic(rootFile: string, projectDir: string): SchematicM
       const pins: SchPin[] = geom.pins.map((p) => { const [x, y] = xf(p.x, p.y); return { num: p.num, name: p.name, x, y }; });
       const yes = (k: string, def: boolean) => { const v = str(s, k); return v === undefined ? def : v === "yes"; };
       symbols.push({
-        ref, value: fields.Value ?? "", footprint: fields.Footprint ?? "", libId, sheet: path, sheetName: name,
+        uuid, file: rel(abs), ref, value: fields.Value ?? "", footprint: fields.Footprint ?? "", libId, sheet: path, sheetName: name,
         x: X, y: Y, rot: R, mirror: mirror === "x" || mirror === "y" ? mirror : undefined, unit, fields,
         dnp: yes("dnp", false), inBom: yes("in_bom", true), onBoard: yes("on_board", true), bbox, pins,
         power: geom.power || ref.startsWith("#"),
@@ -158,7 +158,10 @@ export function parseSchematic(rootFile: string, projectDir: string): SchematicM
       const suuid = str(sh, "uuid") ?? "";
       let subPage: string | undefined;
       for (const proj of children(child(sh, "instances"), "project")) for (const p of children(proj, "path")) if (String(p[1]) === chain) subPage = str(p, "page");
-      walk(childAbs, sub, `${path}${sname}/`, sname, `${chain}/${suuid}`, depth + 1, subPage);
+      const [bx, by] = at(sh);
+      const sz = child(sh, "size");
+      const bw = Number(sz?.[1] ?? 0), bh = Number(sz?.[2] ?? 0);
+      walk(childAbs, sub, `${path}${sname}/`, sname, `${chain}/${suuid}`, depth + 1, subPage, path, [bx, by, bx + bw, by + bh]);
     }
   };
   walk(rootFile, rootTree, "/", "Root", `/${rootUuid}`, 0, "1");

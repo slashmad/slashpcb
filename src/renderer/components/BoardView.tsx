@@ -36,6 +36,11 @@ export function BoardView(p: Props) {
   const [side, setSide] = useState<"top" | "bottom">("top");
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [cursor, setCursor] = useState<[number, number] | null>(null);
+  const [showUnrouted, setShowUnrouted] = useState(true);
+  const unrouted = useMemo(() => p.markers.filter((m) => m.source === "unconnected").flatMap((m) => {
+    const pts = m.items.filter((it) => it.x !== undefined && it.y !== undefined);
+    return pts.length >= 2 ? [[pts[0].x!, pts[0].y!, pts[1].x!, pts[1].y!] as [number, number, number, number]] : [];
+  }), [p.markers]);
   const [ctx, setCtx] = useState<{ x: number; y: number; hit: BoardHit | null; bx: number; by: number } | null>(null);
   const scene = useMemo(() => (p.board ? new BoardScene(p.board) : null), [p.board]);
   const fileRef = useRef<string | null>(null);
@@ -79,9 +84,10 @@ export function BoardView(p: Props) {
       visible, side, highlightRefs: new Set(p.highlightRefs), highlightNets: new Set(p.highlightNets),
       selectedRef: p.selection?.ref ?? null, selectedNet: p.selection?.ref ? null : p.selection?.net ?? null,
       markers: p.markers, activeMarker: p.activeMarker, annotations: p.annotations, activeAnnotation: p.activeAnnotation, dark: p.dark,
+      unrouted: showUnrouted ? unrouted : [],
     }, dpr));
     return () => cancelAnimationFrame(raf);
-  }, [scene, v?.cx, v?.cy, v?.scale, size, visible, side, p.highlightRefs, p.highlightNets, p.selection, p.markers, p.activeMarker, p.annotations, p.activeAnnotation, p.dark]);
+  }, [scene, v?.cx, v?.cy, v?.scale, size, visible, side, p.highlightRefs, p.highlightNets, p.selection, p.markers, p.activeMarker, p.annotations, p.activeAnnotation, p.dark, showUnrouted, unrouted]);
 
   const bboxOf = (refs: string[], nets: string[] = []): [number, number, number, number] | null => {
     if (!p.board) return null;
@@ -118,7 +124,7 @@ export function BoardView(p: Props) {
       const vis = req.layers?.length ? new Set(req.layers.map(canon)) : visible;
       drawBoard(g, scene, fitView(b, req.width, req.height, 0.9), req.width, req.height, {
         visible: vis, side: req.side ?? "top", highlightRefs: new Set(req.highlightRefs ?? []), highlightNets: new Set(req.highlightNets ?? []),
-        markers: p.markers, annotations: p.annotations, dark: true,
+        markers: p.markers, annotations: p.annotations, dark: true, unrouted,
       });
       return c.toDataURL("image/png");
     },
@@ -204,6 +210,10 @@ export function BoardView(p: Props) {
             <span className="swatch" style={{ background: layerColor(l, p.board!.copper) }} />{l}
           </label>
         ))}
+        <label className={`lp-row ${showUnrouted ? "" : "off"}`} title={t("board.unroutedTitle")}>
+          <input type="checkbox" checked={showUnrouted} onChange={() => setShowUnrouted(!showUnrouted)} />
+          <span className="swatch dashed" />{t("board.unrouted")}{unrouted.length ? ` (${unrouted.length})` : ""}
+        </label>
         <div className="lp-actions">
           <button className="link" onClick={() => setVisible(new Set(allLayers))}>{t("board.all")}</button>
           <button className="link" onClick={() => setVisible(new Set([...p.board!.copper, "Edge.Cuts"]))}>{t("board.copperOnly")}</button>

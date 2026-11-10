@@ -3,7 +3,9 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { BoardModel, Footprint, HighlightRequest, SchSymbol, SnapshotRequest } from "../shared/types";
 import { Annotations } from "./annotations";
+import type { KicadBridge } from "./kicad/bridge";
 import { summarizeReport } from "./kicad/checks";
+import { setFields } from "./kicad/edit";
 import { runCli } from "./kicad/cli";
 import type { McpHub, ToolResult } from "./mcpHub";
 import type { KicadProject } from "./project";
@@ -13,6 +15,7 @@ export interface ToolContext {
   annotations(): Annotations | null;
   snapshot(req: Omit<SnapshotRequest, "reqId">): Promise<string>; // data URL (PNG)
   highlight(req: HighlightRequest): void;
+  bridge(): KicadBridge | null; // null when the live link is off
 }
 
 const text = (t: string, isError = false): ToolResult => ({ content: [{ type: "text", text: t }], isError });
@@ -260,6 +263,135 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
       ctx.highlight({ refs, nets, message: a.message, focus: a.focus, view: a.view });
       return text(`Highlighted ${refs.length} part(s) and ${nets.length} net(s) for the user.`);
     },
+  });
+
+  // ---------------------------------------------------------------- live link (KiCad IPC API)
+  const live = async () => {
+    const p = need();
+    const br = ctx.bridge();
+    if (!br) throw new Error("The KiCad live link is off. Ask the user to turn it on (top bar: KiCad live).");
+    const st = await br.request("status");
+    if (!st.connected) throw new Error(`KiCad is not reachable through its IPC API (${st.error ?? "not running"}). Ask the user to open the board in KiCad's PCB editor with the API server enabled.`);
+    const pcb = p.info.pcb;
+    if (!pcb || !(st.boards ?? []).some((b: string) => b.split(/[\\/]/).pop() === pcb)) throw new Error(`KiCad's PCB editor does not have ${pcb ?? "this project's board"} open (open: ${(st.boards ?? []).join(", ") || "none"}).`);
+    return { p, br, pcb };
+  };
+  const notFrozen = (p: KicadProject) => { if (p.info.frozen) throw new Error(`The project is frozen (${p.info.frozenReason}). Propose a new derivative instead.`); };
+
+  hub.register("kicad_live_status", {
+    description: "Whether SlashPCB's live link reaches a running KiCad, which boards are open there, and whether it is this project's board.",
+    inputSchema: { type: "object", properties: {} },
+    async run() {
+      const p = need();
+      const br = ctx.bridge();
+      if (!br) return text("Live link is off (the user can turn it on in the top bar).");
+      const st = await br.request("status").catch((e: any) => ({ connected: false, error: e.message }));
+      const match = (st.boards ?? []).some((b: string) => b.split(/[\\/]/).pop() === p.info.pcb);
+      return text(st.connected ? `Connected to KiCad ${st.version ?? ""}. Open boards: ${(st.boards ?? []).join(", ") || "none"}. This project's board ${match ? "IS" : "is NOT"} open.` : `Not connected: ${st.error ?? "KiCad not running"}`);
+    },
+  });
+
+  hub.register("kicad_select", {
+    description: "Select footprints in the user's open KiCad PCB editor (and in SlashPCB), e.g. to show what you mean.",
+    inputSchema: { type: "object", properties: { refs: { type: "array", items: { type: "string" } } }, required: ["refs"] },
+    async run(a) {
+      const { br, pcb } = await live();
+      const r = await br.request("select", { refs: a.refs ?? [], board: pcb });
+      ctx.highlight({ refs: a.refs ?? [], focus: true, view: "board" });
+      return text(`Selected ${r.selected} footprint(s) in KiCad.`);
+    },
+  });
+
+  hub.register("kicad_move", {
+    description: "Move and/or rotate footprints in the user's open KiCad PCB editor as ONE undoable step (Ctrl+Z in KiCad). Absolute x/y in mm (board coordinates, y down) or relative dx/dy; rot in degrees. Not saved: the user reviews and saves in KiCad. Tracks are not rerouted; check with the user afterwards.",
+    inputSchema: { type: "object", properties: {
+      moves: { type: "array", items: { type: "object", properties: { ref: { type: "string" }, x: { type: "number" }, y: { type: "number" }, dx: { type: "number" }, dy: { type: "number" }, rot: { type: "number" } }, required: ["ref"] } },
+      message: { type: "string", description: "Undo-history label" },
+    }, required: ["moves"] },
+    async run(a) {
+      const { p, br, pcb } = await live();
+      notFrozen(p);
+      const r = await br.request("move", { moves: a.moves, message: a.message ? `SlashPCB: ${a.message}` : undefined, board: pcb });
+      ctx.highlight({ refs: (a.moves ?? []).map((m: any) => m.ref), focus: false, view: "board" });
+      return text(`Moved in KiCad (unsaved, undo with Ctrl+Z there): ${r.moved.map((m: any) => `${m.ref} → (${m.x}, ${m.y})${m.rot != null ? ` ${m.rot}°` : ""}`).join("; ")}. SlashPCB's views update when the user saves.`);
+    },
+    summarize: (a) => `Move ${(a.moves ?? []).map((m: any) => m.ref).join(", ")}`,
+  });
+
+  hub.register("kicad_set_value", {
+    description: "Set Value, Datasheet or Description of footprints in the user's open KiCad PCB editor (one undoable step, not saved). For MPN/LCSC and other fields use set_fields.",
+    inputSchema: { type: "object", properties: { refs: { type: "array", items: { type: "string" } }, field: { type: "string", enum: ["Value", "Datasheet", "Description"] }, value: { type: "string" } }, required: ["refs", "field", "value"] },
+    async run(a) {
+      const { p, br, pcb } = await live();
+      notFrozen(p);
+      const r = await br.request("set_field", { refs: a.refs, field: a.field, value: a.value, board: pcb });
+      return text(`Changed ${a.field} on ${r.changed} footprint(s) in KiCad (unsaved). Remember the schematic: use set_fields for the symbols too.`);
+    },
+  });
+
+  hub.register("kicad_refill_zones", {
+    description: "Refill all copper zones in the user's open KiCad PCB editor (not saved).",
+    inputSchema: { type: "object", properties: {} },
+    async run() { const { p, br, pcb } = await live(); notFrozen(p); await br.request("refill_zones", { board: pcb }, 120000); return text("Zones refilled in KiCad (unsaved)."); },
+  });
+
+  hub.register("kicad_save", {
+    description: "Save the board in the user's open KiCad PCB editor. Only when the user asked to save.",
+    inputSchema: { type: "object", properties: {} },
+    async run() { const { p, br, pcb } = await live(); notFrozen(p); await br.request("save", { board: pcb }); return text("Saved in KiCad. Checks run again automatically."); },
+  });
+
+  // ---------------------------------------------------------------- file edits (schematic fields)
+  hub.register("set_fields", {
+    description: "Set fields (MPN, LCSC, Manufacturer, Value, Datasheet or any custom field) on schematic symbols by reference, written into the .kicad_sch files with a minimal edit; also_board=true writes the same fields on the board footprints. Refused for frozen projects and for files KiCad has open (ask the user to close them or use kicad_set_value for the open board). Symbols in sheets used several times share the field.",
+    inputSchema: { type: "object", properties: {
+      refs: { type: "array", items: { type: "string" } },
+      fields: { type: "object", additionalProperties: { type: "string" }, description: "e.g. {\"MPN\": \"GRM155R71C104KA88D\", \"LCSC\": \"C1525\"}" },
+      also_board: { type: "boolean" },
+    }, required: ["refs", "fields"] },
+    async run(a) {
+      const p = need();
+      notFrozen(p);
+      const refs: string[] = (a.refs ?? []).map(String);
+      const fields: Record<string, string> = a.fields ?? {};
+      const names = Object.keys(fields);
+      if (!refs.length || !names.length) return text("Give refs and fields.", true);
+      if (names.includes("Reference")) return text("Renaming references is not supported here; use KiCad's annotation.", true);
+      const sch = p.design.schematic, board = p.design.board;
+      const lockedFiles = new Set(p.readInfo().locks.map((l) => l.file));
+      const out: string[] = [];
+      const missing = new Set(refs);
+      if (sch) {
+        const byFile = new Map<string, { uuid: string; field: string; value: string }[]>();
+        const pos = new Map<string, [number, number]>();
+        const seen = new Set<string>();
+        for (const s of sch.symbols) {
+          if (!refs.includes(s.ref) || seen.has(`${s.file}|${s.uuid}`)) continue;
+          seen.add(`${s.file}|${s.uuid}`);
+          missing.delete(s.ref);
+          pos.set(s.uuid, [Math.round(s.x * 100) / 100, Math.round((s.bbox[3] + 2.54) * 100) / 100]);
+          for (const f of names) byFile.set(s.file, [...(byFile.get(s.file) ?? []), { uuid: s.uuid, field: f, value: String(fields[f]) }]);
+        }
+        for (const [file, edits] of byFile) {
+          if (lockedFiles.has(file.split("/").pop()!)) { out.push(`SKIPPED ${file}: open in KiCad's schematic editor`); continue; }
+          const r = setFields(p.abs(file), "sch", edits, (u) => pos.get(u) ?? [0, 0]);
+          out.push(`${file}: ${r.changed} changed, ${r.inserted} added${r.missing.length ? `, ${r.missing.length} not found` : ""}`);
+        }
+      }
+      if (a.also_board && board && p.info.pcb) {
+        if (lockedFiles.has(p.info.pcb)) out.push(`SKIPPED ${p.info.pcb}: open in KiCad's PCB editor (use kicad_set_value for Value, or ask the user to close it)`);
+        else {
+          const edits = board.footprints.filter((f) => refs.includes(f.ref)).flatMap((f) => { missing.delete(f.ref); return names.map((n) => ({ uuid: f.uuid, field: n, value: String(fields[n]) })); });
+          const r = setFields(p.abs(p.info.pcb), "pcb", edits);
+          out.push(`${p.info.pcb}: ${r.changed} changed, ${r.inserted} added${r.missing.length ? `, ${r.missing.length} not found` : ""}`);
+        }
+      }
+      if (missing.size) out.push(`Not found: ${[...missing].join(", ")}`);
+      const d = await p.request("agent", { checks: true });
+      out.push(summarizeReport(d.erc, 5), summarizeReport(d.drc, 5));
+      return text(out.join("\n"));
+    },
+    summarize: (a) => `Fields on ${(a.refs ?? []).join(", ")}`,
   });
 
   hub.register("list_annotations", {

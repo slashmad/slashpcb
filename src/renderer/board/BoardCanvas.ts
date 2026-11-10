@@ -15,6 +15,7 @@ export interface DrawOptions {
   activeMarker?: number | null;
   annotations?: Annotation[];
   activeAnnotation?: string | null;
+  unrouted?: [number, number, number, number][]; // ratsnest from DRC's unconnected items
   dark: boolean;
 }
 
@@ -292,6 +293,19 @@ export function drawBoard(ctx: CanvasRenderingContext2D, scene: BoardScene, v: B
       ctx.strokeRect(f.bbox[0], f.bbox[1], f.bbox[2] - f.bbox[0], f.bbox[3] - f.bbox[1]);
       ctx.setLineDash([]);
     }
+  }
+
+  // Unrouted connections (from DRC's unconnected items), like KiCad's ratsnest.
+  if (o.unrouted?.length) {
+    world();
+    ctx.globalAlpha = 0.9;
+    ctx.strokeStyle = o.dark ? "#e8eef7" : "#202833";
+    ctx.lineWidth = 1.2 * minPx;
+    ctx.setLineDash([5 * minPx, 3 * minPx]);
+    ctx.beginPath();
+    for (const [x1, y1, x2, y2] of o.unrouted) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
+    ctx.stroke();
+    ctx.setLineDash([]);
   }
 
   // Overlays in screen space: check markers and user markers.

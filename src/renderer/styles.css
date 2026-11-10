@@ -334,3 +334,13 @@ button.tiny { padding: 0 6px; font-size: 11px; }
 .statusbar { flex: none; }
 .statusbar .warn { color: var(--warn); }
 .check.dim { opacity: 0.55; }
+
+/* live link */
+.live-pill { display: inline-flex; align-items: center; gap: 6px; border-radius: 12px; padding: 2px 10px; font-size: 12px; }
+.live-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: #6b7280; }
+.live-pill.on .dot { background: var(--ok); box-shadow: 0 0 6px #34c77b88; }
+.live-pill.wait .dot, .live-pill.other .dot { background: var(--warn); }
+.live-pill.setup .dot { background: var(--bad); }
+.live-menu { min-width: 340px; right: 0; }
+.live-log { max-height: 160px; overflow: auto; margin: 4px; padding: 6px; background: var(--code); font: 11px ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); }
+.swatch.dashed { background: repeating-linear-gradient(90deg, #e8eef7 0 3px, transparent 3px 5px); }

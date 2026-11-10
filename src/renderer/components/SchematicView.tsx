@@ -176,7 +176,14 @@ export function SchematicView(p: Props) {
     const s = hit(...toSheet(sx, sy));
     p.onSelect(s?.ref ?? null, s ?? undefined);
   };
-  const onDouble = () => setView(null);
+  const onDouble = (e: React.MouseEvent) => {
+    if (!v) return;
+    const [sx, sy] = local(e);
+    const [x, y] = toSheet(sx, sy);
+    const child = sheets.find((s) => s.parent === sheet?.path && s.box && x >= s.box[0] && x <= s.box[2] && y >= s.box[1] && y <= s.box[3]);
+    if (child) setSheetPath(child.path);
+    else setView(null);
+  };
   const onContext = (e: React.MouseEvent) => {
     e.preventDefault();
     if (!v) return;
@@ -196,7 +203,8 @@ export function SchematicView(p: Props) {
       ) : <div className="empty-view muted">{t("sch.exporting")}</div>}
       <canvas ref={overlay} className="sch-overlay" style={{ width: size.w, height: size.h }} />
       {sheets.length > 1 && (
-        <div className="sheet-tabs" onPointerDown={(e) => e.stopPropagation()}>
+        <div className="sheet-tabs" onPointerDown={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+          <button disabled={!sheet?.parent} title={t("sch.up")} onClick={() => sheet?.parent && setSheetPath(sheet.parent)}>↑</button>
           {sheets.map((s) => (
             <button key={s.path} className={s.path === sheet?.path ? "on" : ""} onClick={() => setSheetPath(s.path)} title={`${s.path} · ${s.file}`}>
               {s.page ? `${s.page}. ` : ""}{s.path === "/" ? t("sch.root") : s.name}
@@ -230,7 +238,7 @@ export function SchematicView(p: Props) {
           </div>
         </div>
       )}
-      <div className="view-status muted small">{cursor ? `X ${cursor[0].toFixed(2)}  Y ${cursor[1].toFixed(2)} mm` : ""} · {sheet?.file} · {t("sch.keys")}</div>
+      <div className="view-status muted small">{cursor ? `X ${cursor[0].toFixed(2)}  Y ${cursor[1].toFixed(2)} mm` : ""} · {sheet?.file} · {t("sch.keys")}{sheets.length > 1 ? ` · ${t("sch.enter")}` : ""}</div>
     </div>
   );
 }

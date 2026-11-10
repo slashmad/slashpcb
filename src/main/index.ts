@@ -10,6 +10,7 @@ import { ClaudeSession, listClaudeSessions, loadClaudeHistory } from "./agents/c
 import { CodexSession, listCodexSessions } from "./agents/codex";
 import { Annotations } from "./annotations";
 import { integrateDesktop } from "./desktopIntegration";
+import { KicadBridge, setupBridge } from "./kicad/bridge";
 import { detectKicad, openInKicad } from "./kicad/cli";
 import { McpHub } from "./mcpHub";
 import { KicadProject, resolveProject } from "./project";
@@ -61,6 +62,16 @@ let project: KicadProject | null = null;
 let annotations: Annotations | null = null;
 const hub = new McpHub(app.getPath("userData"), process.env.SLASHPCB_USER_DATA ? "test" : "");
 let agent: AgentSession | null = null;
+const bridge = new KicadBridge(
+  app.isPackaged ? join(process.resourcesPath, "python", "kicad_bridge.py") : join(app.getAppPath(), "python", "kicad_bridge.py"),
+  app.getAppPath(), app.getPath("userData"), () => getSettings().bridgePython,
+);
+let kicadSelecting = false; // selection that came from KiCad must not be sent back
+
+function liveStatus() {
+  const pcb = project?.info.pcb;
+  return { ...bridge.status, matches: !!pcb && (bridge.status.boards ?? []).some((b) => b.split(/[\\/]/).pop() === pcb) };
+}
 const snapshotWaiters = new Map<string, { resolve: (u: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
 const send = (channel: string, ...args: unknown[]) => { if (win && !win.isDestroyed()) win.webContents.send(channel, ...args); };
@@ -223,6 +234,26 @@ function registerIpc(): void {
     return true;
   });
 
+  ipcMain.handle("live:status", () => liveStatus());
+  ipcMain.handle("live:enable", (_e, on: boolean) => {
+    setSettings({ liveLink: on });
+    if (on) bridge.start(); else bridge.stop();
+    return liveStatus();
+  });
+  ipcMain.handle("live:setup", async () => {
+    try {
+      const py = await setupBridge(app.getPath("userData"), (l) => send("live:log", l));
+      setSettings({ liveLink: true });
+      bridge.stop(); bridge.start();
+      return { ok: true, python: py };
+    } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  });
+  ipcMain.handle("live:select", async (_e, refs: string[]) => {
+    const st = liveStatus();
+    if (!getSettings().syncSelection || !st.connected || !st.matches || kicadSelecting) return false;
+    try { await bridge.request("select", { refs, board: project?.info.pcb }); return true; } catch { return false; }
+  });
+
   ipcMain.handle("design:run", () => project?.request("manual") ?? null);
   ipcMain.handle("design:want3d", (_e, force?: boolean) => (project ? (force ? project.request("3d", { checks: false, glb: true }) : project.request3d()) : null));
   ipcMain.handle("design:file", (_e, path: string) => readOutput(path));
@@ -296,7 +327,16 @@ app.whenReady().then(async () => {
   registerTools(hub, {
     project: () => project, annotations: () => annotations, snapshot,
     highlight: (h: HighlightRequest) => send("viewer:highlight", h),
+    bridge: () => (getSettings().liveLink ? bridge : null),
   });
+  bridge.on("status", () => send("live:status", liveStatus()));
+  bridge.on("selection", (m: { board: string; refs: string[]; nets: string[] }) => {
+    if (!getSettings().syncSelection || !project?.info.pcb || (m.board ?? "").split(/[\\/]/).pop() !== project.info.pcb) return;
+    kicadSelecting = true;
+    send("live:selection", { refs: m.refs, nets: m.nets });
+    setTimeout(() => { kicadSelecting = false; }, 800);
+  });
+  if (getSettings().liveLink) bridge.start();
   try { await hub.start(); } catch (e) { console.error("MCP hub:", e); }
   hub.on("activity", (a) => send("mcp:activity", a));
   void detectKicad(getSettings().kicadCliPath);
@@ -377,4 +417,4 @@ app.on("second-instance", (_e, argv) => {
   if (path) void openPath(path);
 });
 app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => { if (!primaryInstance) return; stopAgent(); hub.stop(); project?.dispose(); });
+app.on("before-quit", () => { if (!primaryInstance) return; stopAgent(); bridge.stop(); hub.stop(); project?.dispose(); });

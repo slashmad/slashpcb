@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AgentEvent, PermissionDecision, SessionSummary, UsageSnapshot } from "../../shared/types";
 import { AgentSession, type AgentStartOptions } from "./base";
 import { agentEnv, spawnSpec } from "./binaries";
-import { PCB_INSTRUCTIONS } from "./prompt";
+import { PCB_INSTRUCTIONS, READ_ONLY_TOOLS } from "./prompt";
 
 export const MCP_NAME = "slashpcb";
 
@@ -52,7 +52,7 @@ export class ClaudeSession extends AgentSession {
       "--include-partial-messages",
       "--permission-prompt-tool", "stdio",
       "--mcp-config", JSON.stringify(mcpConfig),
-      "--allowedTools", `mcp__${MCP_NAME}`, "Read", "Glob", "Grep",
+      "--allowedTools", ...READ_ONLY_TOOLS.map((t) => `mcp__${MCP_NAME}__${t}`), "Read", "Glob", "Grep",
       "--append-system-prompt", PCB_INSTRUCTIONS + (o.extraInstructions ?? ""),
     ];
     if (o.model) args.push("--model", o.model);

@@ -16,6 +16,8 @@ const defaults: Settings = {
   autoChecks: true,
   auto3d: false,
   onlineParts: false,
+  liveLink: false,
+  syncSelection: true,
 };
 
 let cache: Settings | null = null;

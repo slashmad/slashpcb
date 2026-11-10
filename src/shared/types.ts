@@ -121,6 +121,8 @@ export interface BoardModel {
 export interface SchPin { num: string; name: string; x: number; y: number }
 
 export interface SchSymbol {
+  uuid: string;
+  file: string; // project-relative .kicad_sch that holds this symbol
   ref: string;
   value: string;
   footprint: string;
@@ -146,6 +148,8 @@ export interface SchSheet {
   w: number; h: number; // page mm
   svg: string | null; // exported SVG (absolute, inside the app's state folder)
   page?: string;
+  parent?: string; // parent sheet path
+  box?: [number, number, number, number]; // sheet symbol on the parent page (mm)
 }
 
 export interface SchLabel { text: string; kind: "label" | "global" | "hier" | "power"; sheet: string; x: number; y: number }
@@ -286,7 +290,12 @@ export interface Settings {
   autoChecks: boolean; // run ERC/DRC after every save
   auto3d: boolean; // export the 3D model after every save (otherwise when the 3D tab opens)
   onlineParts: boolean; // opt-in for part/stock lookups (not implemented yet)
+  liveLink: boolean; // connect to a running KiCad through its IPC API (kicad-python)
+  syncSelection: boolean; // mirror selection between KiCad's PCB editor and SlashPCB
+  bridgePython?: string; // Python with kicad-python (default: repo .venv or <userData>/bridge-venv)
 }
+
+export interface LiveStatus { enabled: boolean; running: boolean; connected: boolean; version?: string | null; boards?: string[]; error?: string; python?: string | null; matches?: boolean }
 
 export interface McpActivity {
   tool: string;

@@ -10,6 +10,39 @@ import type { KicadInfo } from "../../shared/types";
 
 let cached: KicadInfo | null = null;
 
+/**
+ * Environment for host programs (KiCad, the live-link Python). Inside an AppImage, AppRun puts the
+ * bundle's own folders first in PATH, LD_LIBRARY_PATH, XDG_DATA_DIRS and GSETTINGS_SCHEMA_DIR; host
+ * programs would then load the bundle's libraries ("Failed to load" from kicad-cli). Remove them.
+ */
+export function hostEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  const appdir = env.APPDIR;
+  if (!appdir || process.platform !== "linux") return env;
+  for (const k of ["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS", "GSETTINGS_SCHEMA_DIR"]) {
+    const v = env[k];
+    if (v === undefined) continue;
+    const kept = v.split(":").filter((d) => d && !d.startsWith(appdir));
+    if (kept.length) env[k] = kept.join(":"); else delete env[k];
+  }
+  // KiCad itself supports running as an AppImage and locates its kiface libraries from APPDIR.
+  for (const k of ["APPDIR", "APPIMAGE", "ARGV0", "OWD"]) delete env[k];
+  return env;
+}
+
+/**
+ * Environment for KiCad processes. KiCad's embedded Python honours VIRTUAL_ENV/PYTHONPATH/PYTHONHOME:
+ * a venv inherited from a terminal or VS Code (without wxPython) makes pcbnew report "No module
+ * named 'wx'" and disables its Python plugins. Strip them so KiCad uses its normal interpreter.
+ */
+export function kicadEnv(): NodeJS.ProcessEnv {
+  const env = hostEnv();
+  const venv = env.VIRTUAL_ENV;
+  for (const k of ["VIRTUAL_ENV", "PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONUSERBASE", "CONDA_PREFIX", "ELECTRON_RUN_AS_NODE"]) delete env[k];
+  if (venv && env.PATH) env.PATH = env.PATH.split(process.platform === "win32" ? ";" : ":").filter((d) => !d.startsWith(venv)).join(process.platform === "win32" ? ";" : ":");
+  return env;
+}
+
 interface Cmd { file: string; pre: string[] }
 let cmd: Cmd | null = null;
 
@@ -34,7 +67,7 @@ function candidates(custom?: string): Cmd[] {
 function tryVersion(c: Cmd): Promise<string | null> {
   return new Promise((resolve) => {
     if (c.file.includes("/") || c.file.includes("\\")) { if (!existsSync(c.file)) return resolve(null); }
-    execFile(c.file, [...c.pre, "version"], { timeout: 20000, windowsHide: true }, (err, stdout) => {
+    execFile(c.file, [...c.pre, "version"], { timeout: 20000, windowsHide: true, env: kicadEnv() }, (err, stdout) => {
       const v = String(stdout ?? "").trim().split("\n").pop()?.trim();
       resolve(err || !v || !/^\d+\.\d+/.test(v) ? null : v);
     });
@@ -79,7 +112,7 @@ export async function runCli(args: string[], cwd: string, timeoutMs = 300000): P
   return new Promise((resolve, reject) => {
     // Flatpak sandboxes only see the user's files when the folder is shared; --filesystem grants it.
     const pre = c.file === "flatpak" ? [c.pre[0], `--filesystem=${cwd}`, ...c.pre.slice(1)] : c.pre;
-    const p = spawn(c.file, [...pre, ...args], { cwd, windowsHide: true });
+    const p = spawn(c.file, [...pre, ...args], { cwd, windowsHide: true, env: kicadEnv() });
     let stdout = "", stderr = "";
     p.stdout.on("data", (d) => { stdout += d; if (stdout.length > 2e6) stdout = stdout.slice(-1e6); });
     p.stderr.on("data", (d) => { stderr += d; if (stderr.length > 2e6) stderr = stderr.slice(-1e6); });
@@ -95,9 +128,9 @@ export function openInKicad(target: string): boolean {
   if (!info?.gui) return false;
   try {
     let p;
-    if (info.gui === "flatpak") p = spawn("flatpak", ["run", `--filesystem=${target}`, cmd?.pre[cmd.pre.length - 1] ?? "org.kicad.KiCad", target], { detached: true, stdio: "ignore" });
-    else if (process.platform === "darwin") p = spawn("open", ["-a", info.gui, target], { detached: true, stdio: "ignore" });
-    else p = spawn(info.gui, [target], { detached: true, stdio: "ignore", windowsHide: false });
+    if (info.gui === "flatpak") p = spawn("flatpak", ["run", `--filesystem=${target}`, cmd?.pre[cmd.pre.length - 1] ?? "org.kicad.KiCad", target], { detached: true, stdio: "ignore", env: kicadEnv() });
+    else if (process.platform === "darwin") p = spawn("open", ["-a", info.gui, target], { detached: true, stdio: "ignore", env: kicadEnv() });
+    else p = spawn(info.gui, [target], { detached: true, stdio: "ignore", windowsHide: false, env: kicadEnv() });
     p.on("error", () => {});
     p.unref();
     return true;

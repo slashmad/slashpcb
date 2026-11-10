@@ -36,6 +36,15 @@ const api = {
     onUpdate: on("design:update"),
     onState: on("design:state"),
   },
+  live: {
+    status: () => ipcRenderer.invoke("live:status"),
+    enable: (on: boolean) => ipcRenderer.invoke("live:enable", on),
+    setup: () => ipcRenderer.invoke("live:setup"),
+    select: (refs: string[]) => ipcRenderer.invoke("live:select", refs),
+    onStatus: on("live:status"),
+    onSelection: on("live:selection"),
+    onLog: on("live:log"),
+  },
   agent: {
     start: (kind: string, resumeId?: string) => ipcRenderer.invoke("agent:start", kind, resumeId),
     send: (text: string) => ipcRenderer.invoke("agent:send", text),

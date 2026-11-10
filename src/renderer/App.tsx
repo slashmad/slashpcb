@@ -8,6 +8,7 @@ import { AgentPanel } from "./components/AgentPanel";
 import { Board3D } from "./components/Board3D";
 import { BoardView, type BoardHandle } from "./components/BoardView";
 import { LeftPanel, type LeftTab } from "./components/LeftPanel";
+import { LiveMenu } from "./components/LiveMenu";
 import { SchematicView, type SchematicHandle } from "./components/SchematicView";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SourceDrawer } from "./components/SourceDrawer";
@@ -122,6 +123,12 @@ export function App() {
           api.viewer.snapshotDone(req.reqId, url);
         } catch (e: any) { api.viewer.snapshotDone(req.reqId, null, e?.message ?? String(e)); }
       }),
+      api.live.onSelection((m: { refs: string[]; nets: string[] }) => {
+        const ref = m.refs[0] ?? null;
+        setSelectedRef(ref);
+        setHl({ refs: m.refs, nets: m.refs.length ? [] : m.nets });
+        setBoardSel(ref ? { ref, x: 0, y: 0 } : m.nets[0] ? { net: m.nets[0], x: 0, y: 0 } : null);
+      }),
       api.viewer.onHighlight((h: HighlightRequest) => {
         setHl({ refs: h.refs ?? [], nets: h.nets ?? [] });
         if (h.view) switchTab(h.view);
@@ -137,9 +144,14 @@ export function App() {
     return () => offs.forEach((o) => o());
   }, [showToast]);
 
-  // Selection is shared: a reference picked anywhere is selected on the board and in the schematic.
-  const pickRef = (ref: string) => {
+  // Selection is shared: a reference picked anywhere is selected on the board, in the schematic
+  // and (with the live link) in KiCad's PCB editor.
+  const selectRef = (ref: string | null) => {
     setSelectedRef(ref);
+    if (ref) api.live.select([ref]);
+  };
+  const pickRef = (ref: string) => {
+    selectRef(ref);
     const f = design.board?.footprints.find((x) => x.ref === ref);
     setBoardSel(f ? { ref, x: f.x, y: f.y } : null);
     const t = tab === "3d" ? "board" : tab;
@@ -274,6 +286,7 @@ export function App() {
           )}
         </span>
         <span className="grow" />
+        {settings && <LiveMenu settings={settings} onSettings={setSettings} />}
         <button className="kicad-btn" disabled={!kicad?.gui} title={kicad?.cli ?? kicad?.error ?? ""} onClick={() => api.kicad.open(tab === "schematic" && info.sch ? info.sch : tab !== "schematic" && info.pcb ? info.pcb : info.pro)}>
           {tr("kicad.open")}{kicad?.version ? ` ${kicad.version}` : ""}
         </button>
@@ -300,13 +313,13 @@ export function App() {
           <div className={`view ${tab === "schematic" ? "" : "hidden"}`}>
             <SchematicView schematic={design.schematic} markers={erc?.violations ?? []} activeMarker={activeMarker?.kind === "erc" ? activeMarker.i : null}
               annotations={annotations} activeAnnotation={activeAnn} highlightRefs={hl.refs} selectedRef={selectedRef} handle={schH}
-              onSelect={(ref) => { setSelectedRef(ref); const f = ref ? design.board?.footprints.find((x) => x.ref === ref) : null; setBoardSel(f ? { ref: f.ref, x: f.x, y: f.y } : null); }}
+              onSelect={(ref) => { selectRef(ref); const f = ref ? design.board?.footprints.find((x) => x.ref === ref) : null; setBoardSel(f ? { ref: f.ref, x: f.x, y: f.y } : null); }}
               onAddAnnotation={addSchAnnotation} onAsk={setChip} />
           </div>
           <div className={`view ${tab === "board" ? "" : "hidden"}`}>
             <BoardView board={design.board} dark={dark} markers={drc?.violations ?? []} activeMarker={activeMarker?.kind === "drc" ? activeMarker.i : null}
               annotations={annotations} activeAnnotation={activeAnn} highlightRefs={hl.refs} highlightNets={hl.nets} selection={boardSel} handle={boardH}
-              onSelect={(h) => { setBoardSel(h); setSelectedRef(h?.ref ?? null); }} onAddAnnotation={addBoardAnnotation} onAsk={setChip} />
+              onSelect={(h) => { setBoardSel(h); selectRef(h?.ref ?? null); }} onAddAnnotation={addBoardAnnotation} onAsk={setChip} />
           </div>
           <div className={`view ${tab === "3d" ? "" : "hidden"}`}>
             <Board3D glb={design.glb} active={tab === "3d"} running={pipe.running && pipe.stage === "3d"} dark={dark} />

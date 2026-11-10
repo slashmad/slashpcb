@@ -14,6 +14,8 @@ extraResources:
     to: LICENSE
   - from: THIRD-PARTY-NOTICES.md
     to: THIRD-PARTY-NOTICES.md
+  - from: python/kicad_bridge.py
+    to: python/kicad_bridge.py
 # KiCad is not bundled: SlashPCB uses the user's own KiCad 9/10 install (kicad-cli).
 linux:
   category: Development

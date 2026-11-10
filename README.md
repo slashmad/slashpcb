@@ -4,7 +4,7 @@ A local workbench for KiCad projects where AI agents (Claude Code and Codex) rev
 
 SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is a cockpit around KiCad: **KiCad stays the editor, and its files stay the source of truth.**
 
-> Status: early (0.1). Review-first: the agents read the design, run checks, highlight and render. Editing goes through KiCad or through explicit file edits you approve.
+> Status: early (0.2). Review-first: the agents read the design, run checks, highlight and render. Changes go through KiCad's own editor (live link, undoable there) or small field edits you approve.
 
 ## What it does
 
@@ -16,7 +16,11 @@ SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is
 - **Cross-probes:** a part picked in a list, the schematic or the board is selected everywhere.
 - **Markers:** right-click anywhere to place a numbered marker with a task for the agent.
 - **Agent chat** with Claude Code or Codex on your own subscription. The agents get a local MCP server with KiCad-aware tools:
-  `get_design`, `list_components`, `get_component`, `list_nets`, `get_net`, `run_checks`, `render_view` (board, schematic sheet or 3D render), `highlight`, `list_annotations`, `resolve_annotation`.
+  `get_design`, `list_components`, `get_component`, `list_nets`, `get_net`, `run_checks`, `render_view` (board, schematic sheet or 3D render), `highlight`, `list_annotations`, `resolve_annotation`. With the live link, they also get `kicad_live_status`, `kicad_select`, `kicad_move`, `kicad_set_value`, `kicad_refill_zones` and `kicad_save`, plus `set_fields` for file edits.
+- **Live link to KiCad (optional):** through KiCad's IPC API (kicad-python). It mirrors selection between KiCad's PCB editor and SlashPCB. Agents can select, move or rotate footprints and change values in the open editor. Each change is one undo step in KiCad, and nothing is saved unless you ask. Turn it on under **KiCad live** in the top bar. **Set up live link** creates a Python environment in SlashPCB's data folder and installs `kicad-python`. You start that step yourself, and it is the only one that uses the network.
+- **Field edits:** `set_fields` writes MPN, LCSC, Value or any other field into the schematic, and optionally onto the board footprints. Each edit changes only the bytes of that property and writes atomically, and DRC parity reports any remaining mismatch. Edits are refused for frozen projects and for files open in KiCad.
+- **Unrouted connections** from DRC are drawn on the board like a ratsnest. Double-click a sheet symbol to enter the sheet.
+- **Approvals:** read-only tools run freely. Tools that change something ask you first in the chat.
 - **Safety for released designs:** a project with a release marker (`*FINAL_MANIFEST*.json`, `FROZEN`) or a read-only folder is shown as **frozen**, and agents are told never to edit it. Open KiCad editors are detected from KiCad's lock files.
 
 ## How it works
@@ -41,6 +45,7 @@ flowchart LR
 ## Requirements
 
 - KiCad 9 or 10 (`kicad-cli` on PATH, the default install location, or set in Settings › KiCad). The Fedora RPM and Flatpak are detected.
+- For the live link: Python 3.11–3.13 (kicad-python's `pynng` has no wheels for 3.15 yet), plus KiCad's API server enabled in Preferences › Plugins.
 - Claude Code and/or Codex, for example the VS Code extensions or the CLIs.
 
 ## Build and run
@@ -58,7 +63,8 @@ npm run dist:linux        # AppImage, deb, rpm
 
 | Path | Role |
 |---|---|
-| `src/main/kicad/` | S-expression reader, board and schematic parsers, kicad-cli runner, shadow folder, ERC/DRC reports |
+| `src/main/kicad/` | S-expression reader, board and schematic parsers, kicad-cli runner, shadow folder, ERC/DRC reports, field edits, live-link client |
+| `python/kicad_bridge.py` | Live link to a running KiCad (kicad-python) |
 | `src/main/project.ts` | Project: file tree, watcher, locks, frozen detection, background pipeline |
 | `src/main/tools.ts` | MCP tools for agents |
 | `src/main/agents/` | Claude Code / Codex bridges (shared with SlashCAD) |

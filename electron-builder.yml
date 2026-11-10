@@ -1,0 +1,45 @@
+appId: com.slashmad.slashpcb
+productName: SlashPCB
+executableName: slashpcb
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - package.json
+asarUnpack:
+  - dist/mcp/**
+extraResources:
+  - from: LICENSE
+    to: LICENSE
+  - from: THIRD-PARTY-NOTICES.md
+    to: THIRD-PARTY-NOTICES.md
+# KiCad is not bundled: SlashPCB uses the user's own KiCad 9/10 install (kicad-cli).
+linux:
+  category: Development
+  icon: build/icons
+  target: [AppImage, deb, rpm]
+  executableArgs: ["--ozone-platform-hint=auto"]
+  maintainer: slashmad
+  synopsis: Local PCB workbench for KiCad projects with Claude Code and Codex
+deb:
+  depends: ["libgtk-3-0 | libgtk-3-0t64", "libnss3", "libxss1", "libasound2 | libasound2t64"]
+rpm:
+  depends: ["gtk3", "nss", "libXScrnSaver", "alsa-lib"]
+appImage:
+  artifactName: SlashPCB-${version}-${arch}.AppImage
+win:
+  icon: build/icon.ico
+  target: [nsis, portable, zip]
+  artifactName: SlashPCB-${version}-win-${arch}.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: SlashPCB-Setup-${version}.exe
+portable:
+  artifactName: SlashPCB-Portable-${version}.exe
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  target: [dmg, zip]
+  artifactName: SlashPCB-${version}-mac-${arch}.${ext}

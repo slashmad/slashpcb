@@ -1,0 +1,70 @@
+# SlashPCB
+
+A local workbench for KiCad projects where AI agents (Claude Code and Codex) review schematics and boards while you watch live schematic, board and 3D views, and steer them by clicking and marking.
+
+SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is a cockpit around KiCad: **KiCad stays the editor, and its files stay the source of truth.**
+
+> Status: early (0.1). Review-first: the agents read the design, run checks, highlight and render. Editing goes through KiCad or through explicit file edits you approve.
+
+## What it does
+
+- **Opens a KiCad project** (folder, `.kicad_pro`, `.kicad_sch` or `.kicad_pcb`) and shows it in three tabs:
+  - **Schematic:** KiCad's own SVG plot of every sheet (hierarchical sheets as tabs), with selection, highlights and ERC markers on top.
+  - **Board:** a fast 2D view of copper, zones, pads, vias, silkscreen and fab layers from the parsed `.kicad_pcb`. It has per-layer visibility, a top/bottom flip, net and part highlighting, and DRC markers.
+  - **3D:** KiCad's GLB export with parts, copper, silkscreen and solder mask.
+- **Runs ERC and DRC (with schematic parity) in the background** after every save, and lists the violations. A click jumps to the spot.
+- **Cross-probes:** a part picked in a list, the schematic or the board is selected everywhere.
+- **Markers:** right-click anywhere to place a numbered marker with a task for the agent.
+- **Agent chat** with Claude Code or Codex on your own subscription. The agents get a local MCP server with KiCad-aware tools:
+  `get_design`, `list_components`, `get_component`, `list_nets`, `get_net`, `run_checks`, `render_view` (board, schematic sheet or 3D render), `highlight`, `list_annotations`, `resolve_annotation`.
+- **Safety for released designs:** a project with a release marker (`*FINAL_MANIFEST*.json`, `FROZEN`) or a read-only folder is shown as **frozen**, and agents are told never to edit it. Open KiCad editors are detected from KiCad's lock files.
+
+## How it works
+
+```mermaid
+flowchart LR
+  subgraph App[SlashPCB]
+    UI[Schematic / Board / 3D views] --- Main[Main process]
+    Main --> Parse[S-expression parser<br/>.kicad_sch / .kicad_pcb]
+    Main --> CLI[kicad-cli in a shadow folder<br/>SVG, ERC, DRC, GLB, renders]
+    Main --- Hub[MCP hub]
+  end
+  Agent[Claude Code / Codex<br/>your own binaries] -- MCP stdio --> Hub
+  KiCad[KiCad editor] -- saves files --> Files[(Your KiCad project)]
+  Files -- watched --> Main
+```
+
+- **No extra credits:** the app calls no LLM API and needs no API keys. It starts your own `claude` / `codex` binaries, logged in with your own subscription, and strips API-key variables from their environment.
+- **Nothing is written into your project by the app.** `kicad-cli` writes a `.kicad_prl` file next to a project when one is missing. To avoid that, every kicad-cli run happens in a shadow folder under SlashPCB's data folder. There, the project and local-settings files are copies and everything else is linked.
+- **Everything is local:** no telemetry and no uploads. Online part data (stock and prices) is planned as an opt-in that is off by default.
+
+## Requirements
+
+- KiCad 9 or 10 (`kicad-cli` on PATH, the default install location, or set in Settings › KiCad). The Fedora RPM and Flatpak are detected.
+- Claude Code and/or Codex, for example the VS Code extensions or the CLIs.
+
+## Build and run
+
+```sh
+npm install
+npm run build
+npm start                 # Wayland first on Linux, X11 fallback
+npm run typecheck
+npm test                  # parser checks against kicad-cli netlists (needs samples/ and kicad-cli)
+npm run dist:linux        # AppImage, deb, rpm
+```
+
+## Layout
+
+| Path | Role |
+|---|---|
+| `src/main/kicad/` | S-expression reader, board and schematic parsers, kicad-cli runner, shadow folder, ERC/DRC reports |
+| `src/main/project.ts` | Project: file tree, watcher, locks, frozen detection, background pipeline |
+| `src/main/tools.ts` | MCP tools for agents |
+| `src/main/agents/` | Claude Code / Codex bridges (shared with SlashCAD) |
+| `src/renderer/` | React UI: board canvas renderer, schematic view, 3D view, panels |
+| `test/` | Parser checks |
+
+## Licence
+
+MIT. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).

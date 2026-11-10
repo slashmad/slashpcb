@@ -1,0 +1,10 @@
+# Local KiCad sample projects (copies, not part of the repository)
+/samples/
+
+# Node
+node_modules/
+
+# Generated
+/out/
+/dist/
+/release/

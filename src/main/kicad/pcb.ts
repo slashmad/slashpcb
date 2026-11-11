@@ -148,7 +148,7 @@ function pad(l: SList, fpX: Xf, copper: string[], netOf: (l: SList) => string): 
     if (nums.length) { drill = Math.max(...nums); drillMin = Math.min(...nums); }
   }
   const padX = placement(x, y, rot);
-  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, drillMin, pinFunction: str(l, "pinfunction") };
+  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, drillMin, pinFunction: str(l, "pinfunction"), maskMargin: num(l, "solder_mask_margin") };
   if (shp === "circle") p.r = w / 2;
   else if (shp === "oval") p.polys = [mapPts(ovalPoly(w, h), padX)];
   else if (shp === "roundrect" || shp === "chamfered_rect") p.polys = [mapPts(rectPoly(w, h, (num(l, "roundrect_rratio") ?? 0.25) * Math.min(w, h)), padX)];
@@ -299,7 +299,7 @@ export function parseBoard(file: string, text?: string): BoardModel {
       const box = Number.isFinite(court[0]) ? court : Number.isFinite(bbox[0]) ? bbox : ([X - 0.5, Y - 0.5, X + 0.5, Y + 0.5] as [number, number, number, number]);
       footprints.push({
         ref: fields.Reference ?? "", value: fields.Value ?? "", lib: String(it[1] ?? ""),
-        side: layer.startsWith("B.") ? "B" : "F", x: X, y: Y, rot: R, fields, attrs, bbox: box, pads, graphics: g,
+        side: layer.startsWith("B.") ? "B" : "F", x: X, y: Y, rot: R, fields, attrs, bbox: box, pads, graphics: g, maskMargin: num(it, "solder_mask_margin"),
         uuid: str(it, "uuid") ?? str(it, "tstamp") ?? "", path: str(it, "path") ?? "",
       });
     } else if (h === "segment") {
@@ -369,11 +369,13 @@ export function parseBoard(file: string, text?: string): BoardModel {
   const tentDefault = child(setup, "tenting");
   if (tentDefault) (stackup ??= { layers: [] }).tentingDefault = { front: str(tentDefault, "front") ?? "no", back: str(tentDefault, "back") ?? "no" };
 
+  const mask = { padToMask: num(setup, "pad_to_mask_clearance") ?? 0, minWidth: num(setup, "solder_mask_min_width") ?? 0, bridgesInFootprints: str(setup, "allow_soldermask_bridges_in_footprints") === "yes" };
+
   const tb = child(root, "title_block");
   return {
     file, version: num(root, "version") ?? 0, generator: str(root, "generator") ?? "",
     title: str(tb, "title"), rev: str(tb, "rev"), date: str(tb, "date"),
-    thickness: num(child(root, "general"), "thickness"), stackup,
+    thickness: num(child(root, "general"), "thickness"), stackup, mask,
     layers, copper, bbox, footprints, tracks, vias, zones, graphics,
     nets: [...nets].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
     stats: { footprints: footprints.length, pads: padCount, tracks: tracks.length, vias: vias.length, zones: zones.length, nets: nets.size, trackLengthMm: Math.round(trackLen * 10) / 10 },

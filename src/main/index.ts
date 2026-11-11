@@ -18,8 +18,9 @@ import { KicadProject, resolveProject } from "./project";
 import { getSettings, rememberProject, setSettings } from "./settings";
 import { compareWithFolder, compareWithGit } from "./kicad/compare";
 import { describeRule } from "./kicad/invariants";
+import { decoupling, layoutMetrics, testAccess, viasAtPaste } from "./kicad/analysis";
 import { PROFILES } from "./kicad/release";
-import { defaultReleaseDir, listPackages, runPreflight, runRelease } from "./releases";
+import { defaultReleaseDir, listPackages, maskReport, runPreflight, runRelease } from "./releases";
 import { registerTools } from "./tools";
 
 // ---------------------------------------------------------------- data folder
@@ -285,6 +286,18 @@ function registerIpc(): void {
   });
   ipcMain.handle("rules:remove", (_e, id: string) => { if (!project) return false; const ok = project.removeRule(id); project.refreshRules(); return ok; });
   ipcMain.handle("polarity:list", () => project?.polarity() ?? []);
+  ipcMain.handle("parts:list", () => (project ? { lines: project.partLines(), file: project.partsData().file } : null));
+  ipcMain.handle("parts:set", (_e, keyOrRef: string, note: Record<string, unknown> | null) => { // the UI always sends the whole note
+    if (!project) return { ok: false, error: "no project" };
+    try { const r = project.setPartNote(keyOrRef, note as any, true); send("parts:changed", null); return { ok: true, ...r }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  });
+  ipcMain.handle("analysis:get", (_e, profile?: string) => {
+    const b = project?.design.board;
+    if (!project || !b) return null;
+    const pins = new Map<string, Map<string, string>>();
+    for (const sym of project.design.schematic?.symbols ?? []) { const m = pins.get(sym.ref) ?? new Map(); for (const q of sym.pins) if (q.name && q.name !== "~") m.set(q.num, q.name); pins.set(sym.ref, m); }
+    return { metrics: layoutMetrics(b), viaPaste: viasAtPaste(b), decoupling: decoupling(b, pins), testPads: testAccess(b), duplicateUuids: project.duplicateUuidCount(), mask: maskReport(project, profile) };
+  });
   ipcMain.handle("polarity:verify", (_e, ref: string, fingerprint: string | null) => project?.setPolarityVerified(ref, fingerprint) ?? []);
   ipcMain.handle("release:preflight", (_e, profile: string, fresh?: boolean) => (project ? runPreflight(project, profile, !!fresh) : null));
   ipcMain.handle("release:list", () => (project ? listPackages(project) : []));
@@ -388,6 +401,7 @@ app.whenReady().then(async () => {
   for (const t of READ_ONLY_TOOLS) hub.readOnly.add(t);
   try { await hub.start(); } catch (e) { console.error("MCP hub:", e); }
   hub.on("activity", (a) => send("mcp:activity", a));
+  hub.on("parts", () => send("parts:changed", null));
   void detectKicad(getSettings().kicadCliPath);
 
   // Test hook: SLASHPCB_SCREENSHOT=<png> captures the window after the first full pipeline run,

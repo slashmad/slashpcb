@@ -8,8 +8,9 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { BoardModel, CheckReport, CheckViolation, SchematicModel } from "../../shared/types";
 import { diffDesignRules, isRelaxation, type DesignRules } from "./designrules";
+import { compareWithReference, loadReference } from "./libfp";
 
-export type RuleKind = "pin_net" | "pin_unconnected" | "footprint" | "layer_nets" | "locked" | "part_present" | "rules_floor";
+export type RuleKind = "pin_net" | "pin_unconnected" | "footprint" | "land_pattern" | "layer_nets" | "locked" | "part_present" | "rules_floor";
 export interface Rule {
   id: string;
   kind: RuleKind;
@@ -19,6 +20,7 @@ export interface Rule {
   net?: string; // glob, "!" prefix negates: "!GND"
   refs?: string; // "U1", "SW*", "U1 U2"
   footprint?: string; // "Lib:Name" glob
+  reference?: string; // land_pattern: trusted "Lib:Name" or path to a .kicad_mod
   layer?: string; // "In2.Cu"
   nets?: string; // allowed nets on the layer (globs separated by spaces)
   positions?: Record<string, [number, number, number, "F" | "B"]>; // locked snapshot
@@ -77,6 +79,7 @@ export function describeRule(r: Rule): string {
     case "pin_net": return `${r.pins} must be on net ${r.net}`;
     case "pin_unconnected": return `${r.pins} must stay unconnected`;
     case "footprint": return `${r.refs} must use footprint ${r.footprint}`;
+    case "land_pattern": return `${r.refs} must match the land pattern ${r.reference} (pad positions and numbering)`;
     case "layer_nets": return `only nets ${r.nets} on ${r.layer}`;
     case "locked": return `${r.refs} keep their positions (${Object.keys(r.positions ?? {}).length} parts, ±${r.tolerance ?? 0.001})`;
     case "part_present": return `${r.refs} must exist on the board`;
@@ -84,7 +87,8 @@ export function describeRule(r: Rule): string {
   }
 }
 
-export function evaluateRules(file: string | null, data: RulesFile, board: BoardModel | null, sch: SchematicModel | null, rules: DesignRules | null): CheckReport {
+export function evaluateRules(file: string | null, data: RulesFile, board: BoardModel | null, sch: SchematicModel | null, rules: DesignRules | null,
+  libs?: { map: Map<string, string>; projectDir: string }): CheckReport {
   const t0 = Date.now();
   const violations: CheckViolation[] = [];
   const add = (r: Rule, description: string, items: CheckViolation["items"]) =>
@@ -117,6 +121,18 @@ export function evaluateRules(file: string | null, data: RulesFile, board: Board
         if (!hit.length) add(r, `no footprints match ${r.refs}`, []);
         const bad = hit.filter((f) => !fpRe.test(f.lib));
         if (bad.length) add(r, describeRule(r), bad.map((f) => ({ description: `${f.ref} uses ${f.lib}`, x: f.x, y: f.y, ref: f.ref })));
+      } else if (r.kind === "land_pattern") {
+        const refRe = anyGlob(r.refs);
+        const ref = libs && r.reference ? loadReference(r.reference, libs.map, libs.projectDir) : null;
+        if (!ref) add(r, `reference land pattern ${r.reference} not found (use Lib:Name from the library tables or a path to a .kicad_mod)`, []);
+        else {
+          const hit = fps.filter((f) => matchAny(refRe, f.ref));
+          if (!hit.length) add(r, `no footprints match ${r.refs}`, []);
+          for (const f of hit) {
+            const c = compareWithReference(f, ref.pads);
+            if (c.status !== "match") add(r, `${f.ref}: ${c.detail}`, [{ description: `${f.ref} ${c.status}${c.swaps?.length ? `: ${c.swaps.slice(0, 4).join("; ")}` : ""}`, x: f.x, y: f.y, ref: f.ref }]);
+          }
+        }
       } else if (r.kind === "part_present") {
         for (const ref of (r.refs ?? "").split(/[\s,]+/).filter(Boolean)) {
           if (!fps.some((f) => f.ref === ref)) add(r, `${ref} is missing from the board`, []);

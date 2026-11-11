@@ -12,7 +12,10 @@ import { runDrc, runErc } from "./kicad/checks";
 import { loadDesignRules, type DesignRules } from "./kicad/designrules";
 import { evaluateRules, newRuleId, prepareRule, readRules, rulesFileName, writeRules, type Rule } from "./kicad/invariants";
 import { polarityReview, type PolarityEntry } from "./kicad/polarity";
-import { runCli } from "./kicad/cli";
+import { kicadCliPath, runCli } from "./kicad/cli";
+import { libraryMap } from "./kicad/libfp";
+import { duplicateUuids } from "./kicad/analysis";
+import { cleanNote, isEmptyNote, partKey, partLines, partsFileName, readParts, writeParts, type PartLine, type PartNote } from "./kicad/partnotes";
 import { parseBoard } from "./kicad/pcb";
 import { assignSheetSvgs, parseSchematic } from "./kicad/sch";
 import { folderStamp, syncShadow } from "./kicad/shadow";
@@ -354,10 +357,25 @@ export class KicadProject extends EventEmitter {
     return readRules([join(this.dir, rulesFileName), join(this.stateDir, "rules.json")]);
   }
 
+  /** Duplicated UUIDs across the board and every schematic sheet file. */
+  duplicateUuidCount(): number {
+    const files = [this.info.pcb, ...(this.design.schematic?.sheets.map((s) => s.file) ?? [])].filter(Boolean) as string[];
+    let n = 0;
+    for (const f of new Set(files)) { try { n += duplicateUuids(readFileSync(this.abs(f), "utf8")).length; } catch { /* unreadable */ } }
+    return n;
+  }
+
+  private libCache: { at: number; map: Map<string, string> } | null = null;
+  /** Footprint library tables (project + global), cached for a minute. */
+  libs(): { map: Map<string, string>; projectDir: string } {
+    if (!this.libCache || Date.now() - this.libCache.at > 60000) this.libCache = { at: Date.now(), map: libraryMap(this.dir, kicadCliPath()) };
+    return { map: this.libCache.map, projectDir: this.dir };
+  }
+
   private evaluateRulesInto(d: DesignSnapshot): void {
     try {
       const { file, data } = this.rulesData();
-      d.rules = data.rules.length ? evaluateRules(file, data, d.board, d.schematic, this.designRules()) : null;
+      d.rules = data.rules.length ? evaluateRules(file, data, d.board, d.schematic, this.designRules(), this.libs()) : null;
       d.rulesFile = file;
     } catch (e: any) { d.errors.push(`rules: ${e?.message ?? e}`); }
   }
@@ -389,11 +407,40 @@ export class KicadProject extends EventEmitter {
     this.emit("design", this.design, "rules");
   }
 
+  // ------------------------------------------------------------ sourcing notes
+
+  /** Same placement rule as the invariants file: the project unless frozen/read-only. */
+  partsData() {
+    return readParts([join(this.dir, partsFileName), join(this.stateDir, "parts.json")]);
+  }
+  partLines(): PartLine[] {
+    return partLines(this.design.board, this.design.schematic, this.partsData().data.parts);
+  }
+  /** Set (or with null, remove) the note of a BOM line, addressed by its key or by any of its references. Merges unless `replace`. */
+  setPartNote(keyOrRef: string, note: Partial<PartNote> | null, replace = false): { key: string; note: PartNote | null; file: string } {
+    let key = keyOrRef;
+    if (!/^(mpn|vf):/.test(keyOrRef)) {
+      const f = this.design.board?.footprints.find((x) => x.ref === keyOrRef);
+      const s = this.design.schematic?.symbols.find((x) => x.ref === keyOrRef && !x.power);
+      if (f) key = partKey(f);
+      else if (s) key = partKey({ value: s.value, lib: s.footprint, fields: s.fields });
+      else throw new Error(`no part ${keyOrRef}`);
+    }
+    const { file, data } = this.partsData();
+    const locked = this.info.frozen || !this.info.writable;
+    const target = file && !(file.startsWith(this.dir) && locked) ? file : locked ? join(this.stateDir, "parts.json") : join(this.dir, partsFileName);
+    const clean = note ? cleanNote({ ...(replace ? {} : data.parts[key] ?? {}), ...note } as any) : null;
+    if (!clean || isEmptyNote(clean)) delete data.parts[key];
+    else data.parts[key] = { ...clean, updatedAt: new Date().toISOString() };
+    writeParts(target, data);
+    return { key, note: data.parts[key] ?? null, file: target };
+  }
+
   private polarityFile() { return join(this.stateDir, "polarity.json"); }
   private polarityVerified(): Record<string, { fingerprint: string; at: string }> {
     try { return JSON.parse(readFileSync(this.polarityFile(), "utf8")); } catch { return {}; }
   }
-  polarity(): PolarityEntry[] { return polarityReview(this.design.board, this.polarityVerified(), this.design.schematic); }
+  polarity(): PolarityEntry[] { return polarityReview(this.design.board, this.polarityVerified(), this.design.schematic, this.libs()); }
   setPolarityVerified(ref: string, fingerprint: string | null): PolarityEntry[] {
     const v = this.polarityVerified();
     if (fingerprint) v[ref] = { fingerprint, at: new Date().toISOString() }; else delete v[ref];

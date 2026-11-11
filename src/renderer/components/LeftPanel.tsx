@@ -1,10 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CheckReport, CheckViolation, DesignSnapshot, FileDiff, FileNode, ProjectInfo } from "../../shared/types";
 import { api, fmtTime } from "../api";
 import { useT } from "../i18n";
 import { ComparePanel, type RevisionDiff } from "./ComparePanel";
 import { ReleasePanel } from "./ReleasePanel";
-import { PolarityPanel, RulesPanel } from "./ReviewPanels";
+import { LayoutPanel, PartNoteEditor, PolarityPanel, RulesPanel, type PartLine } from "./ReviewPanels";
 
 export type LeftTab = "files" | "parts" | "nets" | "checks" | "release" | "diffs";
 
@@ -68,11 +68,24 @@ function Parts({ design, selectedRef, onPick }: { design: DesignSnapshot; select
     for (const s of bySch.values()) out.push({ ref: s.ref, value: s.value, side: "", mpn: mpn(s.fields), foot: s.footprint.split(":").pop() ?? "", dnp: s.dnp, onlySch: true });
     return out.sort((a, b) => a.ref.localeCompare(b.ref, undefined, { numeric: true }));
   }, [design.board, design.schematic]);
+  const [lines, setLines] = useState<PartLine[]>([]);
+  const [notedOnly, setNotedOnly] = useState(false);
+  useEffect(() => {
+    const load = () => api.parts.list().then((r: { lines: PartLine[] } | null) => setLines(r?.lines ?? []));
+    load();
+    const off = api.parts.onChanged(load);
+    return () => { off(); };
+  }, [design.n]);
+  const lineOf = useMemo(() => { const m = new Map<string, PartLine>(); for (const l of lines) for (const r of l.refs) m.set(r, l); return m; }, [lines]);
   const f = filter.toLowerCase();
-  const shown = rows.filter((r) => !f || `${r.ref} ${r.value} ${r.mpn} ${r.foot}`.toLowerCase().includes(f));
+  const shown = rows.filter((r) => (!f || `${r.ref} ${r.value} ${r.mpn} ${r.foot}`.toLowerCase().includes(f)) && (!notedOnly || lineOf.get(r.ref)?.note));
+  const selLine = selectedRef ? lineOf.get(selectedRef) : undefined;
+  const LC: Record<string, string> = { nrnd: "NRND", eol: "EOL", obsolete: "OBS", unknown: "?" };
   return (
     <div className="list-tab">
-      <div className="mt-tools"><input placeholder={t("left.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} /><span className="muted small">{shown.length}</span></div>
+      <div className="mt-tools"><input placeholder={t("left.filter")} value={filter} onChange={(e) => setFilter(e.target.value)} />
+        <label className="check small" title={t("parts.notedOnly")}><input type="checkbox" checked={notedOnly} onChange={(e) => setNotedOnly(e.target.checked)} />✎</label>
+        <span className="muted small">{shown.length}</span></div>
       <div className="list-body">
         {shown.slice(0, 3000).map((r) => (
           <div key={r.ref} className={`list-row ${selectedRef === r.ref ? "sel" : ""} ${r.dnp ? "dim" : ""}`} onClick={() => onPick(r.ref)} title={`${r.foot}${r.mpn ? ` · ${r.mpn}` : ""}`}>
@@ -80,11 +93,17 @@ function Parts({ design, selectedRef, onPick }: { design: DesignSnapshot; select
             <span className="val">{r.value}</span>
             <span className="muted small grow">{r.mpn || r.foot}</span>
             {r.side && <span className={`side ${r.side}`}>{r.side}</span>}
+            {(() => { const n = lineOf.get(r.ref)?.note; if (!n) return null; return <>
+              {n.lifecycle && LC[n.lifecycle] && <span className={`badge ${n.lifecycle === "unknown" ? "" : "life"}`} title={t("parts.lifecycle")}>{LC[n.lifecycle]}</span>}
+              {n.consigned && <span className="badge new" title={t("parts.consigned")}>CS</span>}
+              {!n.consigned && !(n.lifecycle && LC[n.lifecycle]) && <span className="badge" title={n.note ?? ""}>✎</span>}
+            </>; })()}
             {r.onlySch && <span className="badge stale" title={t("left.onlySch")}>SCH</span>}
             {r.dnp && <span className="badge">DNP</span>}
           </div>
         ))}
       </div>
+      {selLine && <PartNoteEditor key={selLine.key} line={selLine} onSaved={(ls) => setLines(ls)} />}
     </div>
   );
 }
@@ -167,7 +186,7 @@ function Diffs({ diffs, onOpen }: { diffs: FileDiff[]; onOpen(p: string): void }
 function ChecksTab(p: Props) {
   const t = useT();
   const d = p.design;
-  const [sub, setSub] = useState<"checks" | "rules" | "polarity">(() => { try { return (localStorage.getItem("checks-sub") as any) || "checks"; } catch { return "checks"; } });
+  const [sub, setSub] = useState<"checks" | "rules" | "polarity" | "layout">(() => { try { return (localStorage.getItem("checks-sub") as any) || "checks"; } catch { return "checks"; } });
   const pick = (k: typeof sub) => { setSub(k); try { localStorage.setItem("checks-sub", k); } catch { /* none */ } };
   const ruleErr = d.rules?.errors ?? 0;
   return (
@@ -176,6 +195,7 @@ function ChecksTab(p: Props) {
         <button className={sub === "checks" ? "on" : ""} onClick={() => pick("checks")}>ERC/DRC</button>
         <button className={sub === "rules" ? "on" : ""} onClick={() => pick("rules")}>{t("checks.rules")}{ruleErr ? <span className="count bad">{ruleErr}</span> : null}</button>
         <button className={sub === "polarity" ? "on" : ""} onClick={() => pick("polarity")}>{t("checks.polarity")}</button>
+        <button className={sub === "layout" ? "on" : ""} onClick={() => pick("layout")}>{t("checks.layout")}</button>
       </div>
       {sub === "checks" && (
         <div className="checks">
@@ -187,6 +207,7 @@ function ChecksTab(p: Props) {
       )}
       {sub === "rules" && <RulesPanel version={d.n * 1000 + (d.rules?.violations.length ?? 0)} selectedRef={p.selectedRef} onPickRef={p.onPickRef} />}
       {sub === "polarity" && <PolarityPanel version={d.n} selectedRef={p.selectedRef} onPickRef={p.onPickRef} />}
+      {sub === "layout" && <LayoutPanel version={d.n} onPickRef={p.onPickRef} onPickNet={p.onPickNet} />}
     </div>
   );
 }

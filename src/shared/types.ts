@@ -65,6 +65,7 @@ export interface Pad {
   polys?: number[][]; // absolute outlines (all shapes except circle; custom pads may have several)
   r?: number; // circle radius
   pinFunction?: string;
+  maskMargin?: number; // pad-level solder_mask_margin (overrides footprint and board)
 }
 
 export interface Footprint {
@@ -80,6 +81,7 @@ export interface Footprint {
   graphics: Shape[]; // absolute
   uuid: string;
   path: string; // schematic path (links footprint to symbol)
+  maskMargin?: number; // footprint-level solder_mask_margin
 }
 
 export interface Track { x1: number; y1: number; x2: number; y2: number; w: number; layer: string; net: string; pts?: number[] }
@@ -108,6 +110,7 @@ export interface BoardModel {
   date?: string;
   thickness?: number;
   stackup?: Stackup;
+  mask?: { padToMask: number; minWidth: number; bridgesInFootprints: boolean }; // board setup
   layers: LayerInfo[];
   copper: string[]; // copper layer names top to bottom
   bbox: [number, number, number, number];
@@ -300,7 +303,7 @@ export interface Settings {
   liveLink: boolean; // connect to a running KiCad through its IPC API (kicad-python)
   syncSelection: boolean; // mirror selection between KiCad's PCB editor and SlashPCB
   bridgePython?: string; // Python with kicad-python (default: repo .venv or <userData>/bridge-venv)
-  supplierCaps?: Record<string, { minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number; thicknesses?: number[]; tenting?: boolean; source?: string }>;
+  supplierCaps?: Record<string, { minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number; minMaskWeb?: number; thicknesses?: number[]; tenting?: boolean; source?: string }>;
   releaseStep?: boolean; // include a PCBA STEP in release packages
 }
 

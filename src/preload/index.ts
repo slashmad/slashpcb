@@ -41,6 +41,12 @@ const api = {
     add: (r: unknown) => ipcRenderer.invoke("rules:add", r),
     remove: (id: string) => ipcRenderer.invoke("rules:remove", id),
   },
+  analysis: { get: (profile?: string) => ipcRenderer.invoke("analysis:get", profile) },
+  parts: {
+    list: () => ipcRenderer.invoke("parts:list"),
+    set: (keyOrRef: string, note: Record<string, unknown> | null) => ipcRenderer.invoke("parts:set", keyOrRef, note),
+    onChanged: on("parts:changed"),
+  },
   polarity: {
     list: () => ipcRenderer.invoke("polarity:list"),
     verify: (ref: string, fingerprint: string | null) => ipcRenderer.invoke("polarity:verify", ref, fingerprint),

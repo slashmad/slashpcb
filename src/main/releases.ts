@@ -3,8 +3,9 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { detectKicad } from "./kicad/cli";
-import { exportRelease, preflight, PROFILES, type Preflight, type PreflightExtras, type ReleaseResult } from "./kicad/release";
+import { effectiveCaps, exportRelease, preflight, PROFILES, type Preflight, type PreflightExtras, type ReleaseResult } from "./kicad/release";
 import { getSettings } from "./settings";
+import { maskWebs, testAccess, viasAtPaste } from "./kicad/analysis";
 import type { KicadProject } from "./project";
 
 export interface PackageInfo { dir: string; name: string; profile: string; status: string; createdAt: string }
@@ -31,7 +32,36 @@ export function preflightExtras(p: KicadProject, profileId: string): PreflightEx
     designMinClearance: typeof dr.rules.min_clearance === "number" ? dr.rules.min_clearance : undefined,
     polarity: { total: pol.length, verified: pol.filter((e) => e.verified).length, errors: pol.flatMap((e) => e.issues.filter((i) => i.level === "error").map((i) => ({ ref: e.ref, text: i.text }))) },
     caps: getSettings().supplierCaps?.[profileId],
+    partNotes: p.partsData().data.parts,
+    ...boardHints(p, profileId),
   };
+}
+
+/** Mask-web report with the profile's (or the user's) minimum web and the supplier's tenting. */
+export function maskReport(p: KicadProject, profileId?: string) {
+  const b = p.design.board;
+  if (!b) return null;
+  const caps = profileId ? effectiveCaps(profileId, getSettings().supplierCaps?.[profileId]) : {};
+  const name = PROFILES.find((x) => x.id === profileId)?.name;
+  return maskWebs(b, caps.minMaskWeb, caps.minMaskWeb !== undefined ? `${name ?? "supplier"} ${caps.minMaskWeb} mm` : undefined, { viasOpen: caps.tenting === false });
+}
+
+function boardHints(p: KicadProject, profileId: string): Pick<PreflightExtras, "viaPaste" | "testPads" | "duplicateUuids" | "maskWeb"> {
+  const b = p.design.board;
+  if (!b) return {};
+  const vp = viasAtPaste(b).filter((i) => i.kind !== "ring-near");
+  const tp = testAccess(b);
+  return {
+    viaPaste: { overlaps: vp.length, holeInPad: vp.filter((i) => i.kind === "hole-in-pad").length, otherNet: vp.filter((i) => !i.sameNet).length, refs: [...new Set(vp.map((i) => i.ref))] },
+    testPads: { total: tp.length, paste: tp.filter((t) => t.paste).length, blocked: tp.filter((t) => t.clearanceMm < 0).length, refs: tp.filter((t) => t.paste || t.clearanceMm < 0).map((t) => t.ref) },
+    duplicateUuids: p.duplicateUuidCount(),
+    maskWeb: maskSummary(maskReport(p, profileId)!),
+  };
+}
+
+function maskSummary(r: NonNullable<ReturnType<typeof maskReport>>): PreflightExtras["maskWeb"] {
+  const risky = r.webs.filter((w) => !w.sameNet && !w.allowed);
+  return { minWeb: r.minWeb, source: r.thresholdSource, risky: risky.length, merged: risky.filter((w) => w.kind === "merged").length, narrowest: r.narrowest?.web, maskDefined: r.maskDefined.map((m) => m.ref), refs: [...new Set(risky.flatMap((w) => w.refs))] };
 }
 
 export async function runPreflight(p: KicadProject, profileId: string, fresh = false): Promise<Preflight> {

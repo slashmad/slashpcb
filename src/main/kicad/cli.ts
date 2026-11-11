@@ -97,6 +97,11 @@ export async function detectKicad(custom?: string, refresh = false): Promise<Kic
   return cached;
 }
 
+/** The kicad-cli command line found by detectKicad (null before detection or when missing). */
+export function kicadCliPath(): string | null {
+  return cached?.cli ?? null;
+}
+
 export function kicadMajor(): number {
   return cached?.version ? parseInt(cached.version, 10) : 0;
 }

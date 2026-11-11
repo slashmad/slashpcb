@@ -396,3 +396,18 @@ button.tiny { padding: 0 6px; font-size: 11px; }
 .limits { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 6px; padding: 4px 8px; }
 .limits label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); }
 .limits input, .limits select { width: 100%; }
+.layout-panel { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 10px; }
+.layout-panel .small { padding: 1px 0; overflow-wrap: anywhere; }
+.refs-inline { display: inline-flex; flex-wrap: wrap; gap: 3px 8px; }
+.mtable td { padding: 1px 6px 1px 0; }
+.badge.life { background: #5a2323; color: #ffb4b4; }
+.note-editor { border-top: 1px solid #2c313c; max-height: 55%; overflow: auto; flex-shrink: 0; }
+.note-editor summary { cursor: pointer; padding-top: 4px; padding-bottom: 4px; }
+.note-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 8px; margin: 4px 0; }
+.note-grid label { display: flex; flex-direction: column; font-size: 11px; color: #9aa3b2; gap: 2px; min-width: 0; }
+.note-grid label.check { flex-direction: row; align-items: center; gap: 6px; }
+.note-grid .wide { grid-column: 1 / -1; }
+.note-grid input, .note-grid select, .note-grid textarea { width: 100%; box-sizing: border-box; }
+.note-editor { padding: 0 10px 6px; }
+.note-grid { padding: 0; }
+.note-grid input[type="checkbox"] { width: auto; flex: none; }

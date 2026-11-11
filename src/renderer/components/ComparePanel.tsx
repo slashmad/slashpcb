@@ -8,6 +8,7 @@ interface Totals { size: [number, number]; copper: number; footprints: number; t
 export interface RevisionDiff {
   other: string; label: string; ranAt: number;
   rules?: { kind: string; what: string; from?: string; to?: string }[];
+  metrics?: { before: Record<string, any>; after: Record<string, any> };
   board: null | {
     added: string[]; removed: { ref: string; x: number; y: number; bbox: [number, number, number, number] }[];
     moved: { ref: string; dx: number; dy: number; from: [number, number]; to: [number, number] }[];
@@ -72,6 +73,16 @@ export function ComparePanel({ diff, onDiff, onPickRef }: { diff: RevisionDiff |
                 {b.netsRemoved.map((n) => <div key={"r" + n} className="cmp-row small del">− {n}</div>)}
               </Section>
             </>
+          )}
+          {diff.metrics && (
+            <Section title={t("cmp.metrics")} n={1} open>
+              <table className="mtable small"><tbody>
+                {(["totalLengthMm", "segments", "arcs", "vias", "signalVias", "shortSegments", "offAngle", "directionChanges"] as const).map((k) => {
+                  const a = diff.metrics!.before[k], c = diff.metrics!.after[k];
+                  return <tr key={k} className={a === c ? "muted" : ""}><td>{t(`cmp.m.${k}`)}</td><td>{a}</td><td>→</td><td><b>{c}</b></td></tr>;
+                })}
+              </tbody></table>
+            </Section>
           )}
           {diff.rules && diff.rules.length > 0 && (
             <Section title={t("cmp.rules")} n={diff.rules.length} open>

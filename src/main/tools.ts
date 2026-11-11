@@ -1,16 +1,18 @@
 // KiCad design tools exposed to agents through the MCP hub. Phase 1: read-only plus renders.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import type { BoardModel, Footprint, HighlightRequest, SchSymbol, SnapshotRequest } from "../shared/types";
 import { Annotations } from "./annotations";
 import type { KicadBridge } from "./kicad/bridge";
 import { summarizeReport } from "./kicad/checks";
 import { compareWithFolder, compareWithGit, diffText } from "./kicad/compare";
+import { partsText } from "./kicad/partnotes";
+import { decoupling, duplicateUuids, hintsText, layoutMetrics, maskText, metricsText, testAccess, viasAtPaste } from "./kicad/analysis";
 import { setFields } from "./kicad/edit";
 import { describeRule, type Rule } from "./kicad/invariants";
 import { polarityText } from "./kicad/polarity";
 import { PROFILES } from "./kicad/release";
-import { listPackages, preflightText, releaseRoot, runPreflight, runRelease } from "./releases";
+import { listPackages, maskReport, preflightText, releaseRoot, runPreflight, runRelease } from "./releases";
 import { runCli } from "./kicad/cli";
 import type { McpHub, ToolResult } from "./mcpHub";
 import { resolveProject, type KicadProject } from "./project";
@@ -420,15 +422,15 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
   });
 
   hub.register("add_rule", {
-    description: "Add a design invariant (asks the user). Kinds: pin_net {pins:'D*.1', net:'COL*' or '!GND'}, pin_unconnected {pins:'U8.5'}, footprint {refs:'U1', footprint:'Lib:Name*'}, layer_nets {layer:'In2.Cu', nets:'GND'}, locked {refs:'SW*'} (snapshots current positions), part_present {refs:'U1 J1'}, rules_floor {} (snapshots current design rules; later relaxations fail). Globs use * and ?. Prefer narrow patterns (e.g. 'D0? D1?' rather than 'D*' when other diodes exist).",
+    description: "Add a design invariant (asks the user). Kinds: pin_net {pins:'D*.1', net:'COL*' or '!GND'}, pin_unconnected {pins:'U8.5'}, footprint {refs:'U1', footprint:'Lib:Name*'}, land_pattern {refs:'U3', reference:'Lib:Name' or a .kicad_mod path} (pad positions AND numbering must match a trusted land pattern; catches reversed or mirrored pin order), layer_nets {layer:'In2.Cu', nets:'GND'}, locked {refs:'SW*'} (snapshots current positions), part_present {refs:'U1 J1'}, rules_floor {} (snapshots current design rules; later relaxations fail). Globs use * and ?. Prefer narrow patterns (e.g. 'D0? D1?' rather than 'D*' when other diodes exist).",
     inputSchema: { type: "object", properties: {
-      kind: { type: "string", enum: ["pin_net", "pin_unconnected", "footprint", "layer_nets", "locked", "part_present", "rules_floor"] },
-      pins: { type: "string" }, net: { type: "string" }, refs: { type: "string" }, footprint: { type: "string" }, layer: { type: "string" }, nets: { type: "string" },
+      kind: { type: "string", enum: ["pin_net", "pin_unconnected", "footprint", "land_pattern", "layer_nets", "locked", "part_present", "rules_floor"] },
+      pins: { type: "string" }, net: { type: "string" }, refs: { type: "string" }, footprint: { type: "string" }, reference: { type: "string", description: "land_pattern: trusted Lib:Name or path to a .kicad_mod (e.g. the maker's land pattern)" }, layer: { type: "string" }, nets: { type: "string" },
       tolerance: { type: "number" }, severity: { type: "string", enum: ["error", "warning"] }, note: { type: "string" },
     }, required: ["kind"] },
     async run(a) {
       const p = need();
-      const rule = p.addRule({ kind: a.kind, pins: a.pins, net: a.net, refs: a.refs, footprint: a.footprint, layer: a.layer, nets: a.nets, tolerance: a.tolerance, severity: a.severity, note: a.note } as Rule);
+      const rule = p.addRule({ kind: a.kind, pins: a.pins, net: a.net, refs: a.refs, footprint: a.footprint, reference: a.reference, layer: a.layer, nets: a.nets, tolerance: a.tolerance, severity: a.severity, note: a.note } as Rule);
       p.refreshRules();
       const v = p.design.rules?.violations.filter((x) => x.type.startsWith(`${rule.id}:`)) ?? [];
       return text(`Added ${rule.id}: ${describeRule(rule)} → ${v.length ? `currently VIOLATED: ${v.map((x) => x.description).join("; ")}` : "holds now"}. Stored in ${p.rulesData().file}.`);
@@ -446,6 +448,61 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
     description: "Polarized and multi-pin parts (ICs, transistors, diodes, LEDs, polarized capacitors, connectors) with pad numbers, pin names and nets, side and rotation, contradictions (ground pin on a signal net, supply pin on ground, NC pin connected, unflipped bottom-side copy) and whether the user has verified each against the datasheet. Wrong land-pattern pin order is invisible to DRC: point the user to parts that deserve a look; only the user marks parts verified.",
     inputSchema: { type: "object", properties: { only_open: { type: "boolean", description: "only unverified parts or parts with issues" } } },
     async run(a) { const p = need(); return text(polarityText(p.polarity(), !!a.only_open)); },
+  });
+
+  hub.register("layout_metrics", {
+    description: "Layout review measures (R44-style gate B, not pass/fail): track length per layer, segments/arcs, short and off-45° segments, direction changes, vias (ground vs signal) and signal nets with most vias, largest detours of two-pad nets, differential-pair length differences, zone fills split into islands. Use compare_revision for before/after.",
+    inputSchema: { type: "object", properties: {} },
+    async run() { return text(metricsText(layoutMetrics(board()))); },
+  });
+
+  hub.register("design_hints", {
+    description: "Checks DRC does not make: vias whose ring or hole reaches a pasted pad (solder wicking; matters when the supplier does not tent), IC supply pins without a nearby decoupling capacitor, test pads with paste or without room for a Ø0.5 mm probe, duplicated UUIDs, solder-mask webs between pad openings (against the supplier's minimum web; mask-defined lands). Read-only.",
+    inputSchema: { type: "object", properties: { far_mm: { type: "number", description: "decoupling distance considered far (default 5 mm)" }, profile: { type: "string", enum: PROFILES.map((x) => x.id), description: "supplier profile for the minimum mask web and via tenting (default: 0.1 mm, vias as tented in the design)" } } },
+    async run(a) {
+      const p = need();
+      const b = board();
+      const pins = new Map<string, Map<string, string>>();
+      for (const s of p.design.schematic?.symbols ?? []) { const m = pins.get(s.ref) ?? new Map(); for (const q of s.pins) if (q.name && q.name !== "~") m.set(q.num, q.name); pins.set(s.ref, m); }
+      const read = (f: string) => { try { return duplicateUuids(readFileSync(p.abs(f), "utf8")); } catch { return []; } };
+      const sch = [...new Set(p.design.schematic?.sheets.map((s) => s.file) ?? [])].flatMap(read);
+      return text(hintsText(viasAtPaste(b), decoupling(b, pins), testAccess(b), p.info.pcb ? read(p.info.pcb) : [], sch, a.far_mm ?? 5) + "\n" + maskText(maskReport(p, a.profile)!));
+    },
+  });
+
+  // ---------------------------------------------------------------- sourcing notes
+  hub.register("list_parts", {
+    description: "BOM lines (grouped by MPN, else value+footprint) with references, quantity and the user's offline sourcing notes: lifecycle, customer-supplied (consigned), approved alternates, lead time, quote with currency, free note. Notes are typed by the user or an agent, not live supplier data. Read-only.",
+    inputSchema: { type: "object", properties: { only_noted: { type: "boolean", description: "only lines that have a note" } } },
+    async run(a) { const p = need(); return text(partsText(p.partLines(), !!a.only_noted)); },
+  });
+  hub.register("set_part_note", {
+    description: "Record an offline sourcing note for a BOM line (applies to every reference with the same MPN, or value+footprint). Fields are merged into the existing note; pass clear=true to delete it. Written to slashpcb.parts.json in the project (SlashPCB's state folder for frozen projects). Only record facts the user stated or that come from a cited datasheet/supplier page.",
+    inputSchema: { type: "object", properties: {
+      part: { type: "string", description: "a reference (e.g. U3) or a key from list_parts (mpn:… / vf:…)" },
+      lifecycle: { type: "string", enum: ["active", "nrnd", "eol", "obsolete", "unknown"] },
+      consigned: { type: "boolean", description: "customer-supplied: the assembler must not buy it" },
+      alternates: { type: "array", items: { type: "string" }, description: "approved substitute MPNs (replaces the list)" },
+      lead_time_days: { type: "number" },
+      note: { type: "string" },
+      quote: { type: "object", properties: { unit_price: { type: "number" }, currency: { type: "string", description: "ISO code, required with a price (EUR, SEK, USD …)" }, qty: { type: "number" }, supplier: { type: "string" }, date: { type: "string" } } },
+      clear: { type: "boolean" },
+    }, required: ["part"] },
+    async run(a) {
+      const p = need();
+      const n: Record<string, unknown> = {};
+      if (a.lifecycle !== undefined) n.lifecycle = a.lifecycle;
+      if (a.consigned !== undefined) n.consigned = !!a.consigned;
+      if (a.alternates !== undefined) n.alternates = a.alternates;
+      if (a.lead_time_days !== undefined) n.leadTimeDays = a.lead_time_days;
+      if (a.note !== undefined) n.note = a.note;
+      if (a.quote) n.quote = { unitPrice: a.quote.unit_price, currency: a.quote.currency, qty: a.quote.qty, supplier: a.quote.supplier, date: a.quote.date };
+      try {
+        const r = p.setPartNote(String(a.part), a.clear ? null : n);
+        hub.emit("parts", r);
+        return text(r.note ? `Saved note for ${r.key} in ${r.file.startsWith(p.dir) ? relative(p.dir, r.file) : "SlashPCB's state folder (the project is frozen)"}: ${JSON.stringify(r.note)}` : `Removed the note for ${r.key}.`);
+      } catch (e: any) { return text(e?.message ?? String(e), true); }
+    },
   });
 
   // ---------------------------------------------------------------- release packages

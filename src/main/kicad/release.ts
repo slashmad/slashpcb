@@ -11,6 +11,7 @@ import { basename, join, relative } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import type { BoardModel, CheckReport, Footprint, SchematicModel } from "../../shared/types";
 import { kicadEnv, runCli } from "./cli";
+import { notesSummary, partKey, type PartNote } from "./partnotes";
 
 export interface SupplierProfile {
   id: string;
@@ -27,7 +28,7 @@ export interface SupplierProfile {
 /** Manufacturing limits for a supplier/process. Only values someone verified belong here. */
 export interface SupplierCaps {
   minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number;
-  thicknesses?: number[]; tenting?: boolean; source?: string;
+  minMaskWeb?: number; thicknesses?: number[]; tenting?: boolean; source?: string;
 }
 
 export const PROFILES: SupplierProfile[] = [
@@ -48,11 +49,11 @@ export const PROFILES: SupplierProfile[] = [
   },
   {
     id: "aisler", name: "Aisler", needsPartNumber: "mpn",
-    note: "Gerber + Excellon zip with BOM and CPL in generic columns. Limits from Aisler's published 4-layer ENIG rules as recorded in a project review (Nov 2026): 0.125 mm minimum gap, no via tenting (via rings stay open). Confirm against Aisler's current rules.",
+    note: "Gerber + Excellon zip with BOM and CPL in generic columns. Limits from Aisler's published 4-layer ENIG rules as recorded in a project review (Nov 2026): 0.125 mm minimum gap, 0.1 mm minimum mask web, no via tenting (via rings stay open). Confirm against Aisler's current rules.",
     bomColumns: ["Designator", "Qty", "Value", "Footprint", "Manufacturer", "MPN"],
     cplColumns: ["Designator", "Mid X", "Mid Y", "Rotation", "Layer"],
     cplLayer: { top: "top", bottom: "bottom" },
-    caps: { minGap: 0.125, tenting: false, thicknesses: [0.8, 1.6], source: "Aisler 4-layer ENIG rules as recorded 2026-11; verify" },
+    caps: { minGap: 0.125, minMaskWeb: 0.1, tenting: false, thicknesses: [0.8, 1.6], source: "Aisler 4-layer ENIG rules as recorded 2026-11; verify" },
   },
   {
     id: "danishpcb", name: "DanishPCB", needsPartNumber: "mpn",
@@ -112,6 +113,11 @@ export interface PreflightExtras {
   designMinClearance?: number; // board-setup minimum clearance (what DRC enforces)
   polarity?: { total: number; verified: number; errors: { ref: string; text: string }[] };
   caps?: SupplierCaps; // user-provided override of the profile's limits
+  viaPaste?: { overlaps: number; holeInPad: number; otherNet: number; refs: string[] };
+  testPads?: { total: number; paste: number; blocked: number; refs: string[] };
+  duplicateUuids?: number;
+  maskWeb?: { minWeb: number; source: string; risky: number; merged: number; narrowest?: number; maskDefined: string[]; refs: string[] };
+  partNotes?: Record<string, PartNote>; // offline sourcing notes (slashpcb.parts.json)
 }
 
 export interface BoardMinima { minTrack?: number; minDrill?: number; minViaDiameter?: number; minViaRing?: number; minPadRing?: number; vias: number; tentedVias: number; thickness?: number }
@@ -231,6 +237,31 @@ export function preflight(profileId: string, b: BoardModel | null, sch: Schemati
     add({ id: "thickness", title: "Board thickness", status: Math.abs(near - mins.thickness) > 0.1 ? "warn" : "pass",
       detail: `design ${mins.thickness} mm → order ${near} mm. Make sure the quote uses this thickness (offers have come back for 1.6 mm on 0.8 mm designs).` });
   } else if (mins.thickness) add({ id: "thickness", title: "Board thickness", status: "pass", detail: `design ${mins.thickness} mm: state it explicitly in the order.` });
+  if (x.viaPaste) {
+    const vp = x.viaPaste;
+    add({ id: "via-paste", title: "Vias at paste openings", status: vp.otherNet || vp.holeInPad ? "warn" : vp.overlaps ? "warn" : "pass",
+      detail: vp.overlaps ? `${vp.overlaps} via ring(s) reach a pasted pad (${vp.holeInPad} hole in pad, ${vp.otherNet} on another net${caps.tenting === false ? "; the supplier does not tent, so rings stay open" : ""}): solder can wick into the via. Ask the assembler how they handle them.` : "no via reaches a pasted pad", refs: vp.refs.slice(0, 40) });
+  }
+  if (x.testPads && x.testPads.total) add({ id: "test-pads", title: "Test pads", status: x.testPads.paste || x.testPads.blocked ? "warn" : "pass",
+    detail: `${x.testPads.total} test pads, ${x.testPads.paste} with paste, ${x.testPads.blocked} where a Ø0.5 mm probe touches a neighbour`, refs: x.testPads.refs });
+  if (x.duplicateUuids !== undefined) add({ id: "uuids", title: "Unique object IDs", status: x.duplicateUuids ? "fail" : "pass", detail: x.duplicateUuids ? `${x.duplicateUuids} duplicated UUID(s) in the board/schematic (scripted edits or copy-paste); KiCad may mix up objects` : "no duplicates" });
+  if (x.partNotes) {
+    const s = notesSummary(assembled, x.partNotes);
+    const bad = s.lifecycle.length;
+    add({ id: "part-notes", title: "Sourcing notes", status: bad || s.unknownLifecycle.length ? "warn" : "pass",
+      detail: !s.noted ? "No sourcing notes yet (Parts tab): lifecycle, consigned parts, alternates and lead times are optional." :
+        [`${s.noted} placed part(s) with notes`, bad && `${bad} not active (${s.lifecycle.slice(0, 6).map((l) => `${l.ref} ${l.status.toUpperCase()}`).join(", ")}${bad > 6 ? ", …" : ""})`,
+          s.missingAlternates.length && `${s.missingAlternates.length} of them without an approved alternate`, s.unknownLifecycle.length && `${s.unknownLifecycle.length} with unknown lifecycle`,
+          s.consigned.length && `${s.consigned.length} customer-supplied (send them with the order)`].filter(Boolean).join("; "),
+      refs: [...s.lifecycle.map((l) => l.ref), ...s.consigned, ...s.unknownLifecycle].slice(0, 60) });
+  }
+  if (x.maskWeb) {
+    const m = x.maskWeb;
+    add({ id: "mask-web", title: "Solder-mask webs", status: m.risky ? "warn" : "pass",
+      detail: (m.risky ? `${m.risky} pad pair(s) on different nets with a mask web below ${m.minWeb} mm (${m.merged} merged openings): CAM will usually remove these webs, leaving no mask between the pads.` : `no web between different nets below ${m.minWeb} mm${m.narrowest !== undefined ? `; narrowest ${m.narrowest} mm` : ""}.`)
+        + ` Threshold: ${m.source}.` + (m.maskDefined.length ? ` Mask-defined lands on ${m.maskDefined.join(", ")}: state this to the fabricator.` : ""),
+      refs: [...m.refs, ...m.maskDefined].slice(0, 40) });
+  }
   if (caps.tenting === false && mins.tentedVias > 0) add({ id: "tenting", title: "Via tenting", status: "warn",
     detail: `${mins.tentedVias} via(s) are tented in the design, but ${profile.name} does not tent: rings will be exposed. Check vias next to paste openings and contacts.` });
   add({ id: "physical", title: "Physical verification", status: "warn", detail: "Checks are rule-based. They do not prove function, RF/EMC, thermal behaviour or mechanical fit." });
@@ -323,6 +354,20 @@ export async function exportRelease(o: {
   }
   const bomFile = join(o.outDir, `${stem}-${profile.id}-bom.csv`);
   writeFileSync(bomFile, csv(bomRows));
+  // Sourcing notes next to the BOM (the supplier's BOM template stays unchanged).
+  const notes = o.extras?.partNotes ?? {};
+  let sourcingFile: string | null = null;
+  const noted = [...groups.values()].map((g) => ({ g, n: notes[partKey(g[0])] })).filter((e) => e.n);
+  if (noted.length) {
+    const rows = [["Designator", "Qty", "Value", "Manufacturer", "MPN", "Lifecycle", "Customer-supplied", "Approved alternates", "Lead time (days)", "Quote unit price", "Quote currency", "Quote qty", "Quote supplier", "Quote date", "Note"]];
+    for (const { g, n } of noted.sort((a, c) => natural(a.g[0].ref, c.g[0].ref))) {
+      const f = g[0], q = n!.quote;
+      rows.push([g.map((x) => x.ref).sort(natural).join(","), String(g.length), f.value, field(f.fields, MFR_FIELDS), field(f.fields, MPN_FIELDS), n!.lifecycle ?? "", n!.consigned ? "yes" : "",
+        (n!.alternates ?? []).join(" / "), n!.leadTimeDays !== undefined ? String(n!.leadTimeDays) : "", q?.unitPrice !== undefined ? String(q.unitPrice) : "", q?.currency ?? "", q?.qty ? String(q.qty) : "", q?.supplier ?? "", q?.date ?? "", n!.note ?? ""]);
+    }
+    sourcingFile = join(o.outDir, `${stem}-sourcing-notes.csv`);
+    writeFileSync(sourcingFile, csv(rows));
+  }
 
   // CPL from KiCad's own position file (exact coordinates), mapped to the profile.
   const posLines = readFileSync(posFile, "utf8").trim().split(/\r?\n/);
@@ -393,7 +438,7 @@ export async function exportRelease(o: {
 
   // Manifest + readme.
   const git = await new Promise<string | null>((res) => execFile("git", ["-C", o.projectDir, "rev-parse", "--short", "HEAD"], { env: kicadEnv(), timeout: 5000 }, (e, out) => res(e ? null : out.trim())));
-  const outputs = [...gerbers.map((g) => join(gerberDir, g)), zipFile, bomFile, cplFile, posFile, ...extra];
+  const outputs = [...gerbers.map((g) => join(gerberDir, g)), zipFile, bomFile, cplFile, posFile, ...(sourcingFile ? [sourcingFile] : []), ...extra];
   const manifest = {
     format: "slashpcb-release/1", createdAt: new Date().toISOString(), app: `SlashPCB ${o.appVersion}`, kicad: o.kicadVersion,
     profile: { id: profile.id, name: profile.name }, board: { file: basename(o.pcb), title: b.title, rev: b.rev, sizeMm: [+(b.bbox[2] - b.bbox[0]).toFixed(3), +(b.bbox[3] - b.bbox[1]).toFixed(3)], copperLayers: b.copper.length, thicknessMm: b.thickness },
@@ -415,6 +460,7 @@ export async function exportRelease(o: {
     `  ${basename(zipFile)}  (Gerber + Excellon drill)`,
     `  ${basename(bomFile)}`,
     `  ${basename(cplFile)}`,
+    ...(sourcingFile ? ["", `Sourcing notes (lifecycle, customer-supplied parts, approved alternates): ${basename(sourcingFile)}`] : []),
     "",
     "For the supplier and for review: BUILD_SPEC.md (stack, finish, limits, assembly notes), review/ (assembly drawings top and bottom, every layer with index.html, PCBA STEP).",
     "Coordinates: CPL in KiCad's absolute millimetres, X right and Y up, bottom-side X not mirrored; rotations are KiCad's (plus the profile's offsets).",
@@ -483,7 +529,9 @@ export function buildSpec(b: BoardModel, stem: string, profile: SupplierProfile,
   const bottom = parts.filter((f) => f.side === "B").length;
   const fine = parts.filter((f) => f.pads.length >= 8 && f.pads.some((p) => Math.min(p.w, p.h) <= 0.3)).map((f) => f.ref);
   const dnp = b.footprints.filter((f) => f.attrs.includes("dnp")).map((f) => f.ref);
-  const consigned = parts.filter((f) => /consign|customer|kund/i.test(Object.entries(f.fields).map(([k, v]) => `${k}=${v}`).join(" "))).map((f) => f.ref);
+  const notes = notesSummary(parts, x?.partNotes ?? {});
+  const consigned = [...new Set([...notes.consigned, ...parts.filter((f) => /consign|customer|kund/i.test(Object.entries(f.fields).map(([k, v]) => `${k}=${v}`).join(" "))).map((f) => f.ref)])].sort(natural);
+  const alternates = [...new Map(parts.map((f) => [partKey(f), f])).entries()].map(([k, f]) => ({ f, n: x?.partNotes?.[k] })).filter((e) => e.n?.alternates?.length);
   const L: (string | null)[] = [
     `# ${stem} — fabrication and assembly specification`,
     "",
@@ -498,7 +546,8 @@ export function buildSpec(b: BoardModel, stem: string, profile: SupplierProfile,
     su?.layers.some((l) => l.type !== "copper" && l.thickness) ? `- Dielectrics: ${su!.layers.filter((l) => /prepreg|core/i.test(l.type)).map((l) => `${l.name} ${l.thickness} mm ${l.material ?? ""}`.trim()).join("; ")}. Confirm the supplier's actual stack and any impedance targets.` : null,
     `- Smallest features: track ${mins.minTrack ?? "–"} mm, drill ${mins.minDrill ?? "–"} mm, via ${mins.minViaDiameter ?? "–"} mm with ring ${mins.minViaRing ?? "–"} mm, plated pad ring ${mins.minPadRing ?? "–"} mm. Board rule minimum clearance ${x?.designMinClearance ?? "?"} mm.`,
     `- Vias: ${mins.vias}, of which ${mins.tentedVias} tented in the design.${caps.tenting === false ? ` ${profile.name} does not tent vias: rings will be exposed.` : ""}`,
-    caps.source ? `- Supplier limits used for the checks: ${[caps.minTrack && `track ${caps.minTrack}`, caps.minGap && `gap ${caps.minGap}`, caps.minDrill && `drill ${caps.minDrill}`, caps.minRing && `ring ${caps.minRing}`].filter(Boolean).join(", ")} mm (${caps.source}).` : null,
+    caps.source ? `- Supplier limits used for the checks: ${[caps.minTrack && `track ${caps.minTrack}`, caps.minGap && `gap ${caps.minGap}`, caps.minDrill && `drill ${caps.minDrill}`, caps.minRing && `ring ${caps.minRing}`, caps.minMaskWeb && `mask web ${caps.minMaskWeb}`].filter(Boolean).join(", ")} mm (${caps.source}).` : null,
+    x?.maskWeb ? `- Solder-mask webs: narrowest between different nets ${x.maskWeb.narrowest ?? "–"} mm; ${x.maskWeb.risky} pair(s) below ${x.maskWeb.minWeb} mm.${x.maskWeb.maskDefined.length ? ` Mask-defined lands (negative mask expansion, keep the mask openings as drawn): ${x.maskWeb.maskDefined.join(", ")}.` : ""}` : null,
     noPaste.length ? `- ${noPaste.length} board-only pad groups have no paste and must stay as supplied (contacts, test pads, jumpers, edge fingers): ${noPaste.slice(0, 40).map((f) => f.ref).join(", ")}${noPaste.length > 40 ? " …" : ""}. Do not cover them with labels or markings.` : null,
     "- The Gerbers describe one unpanelized board. Please propose rails, fiducials and depanelization outside the outline.",
     "",
@@ -508,7 +557,9 @@ export function buildSpec(b: BoardModel, stem: string, profile: SupplierProfile,
     "- CPL: KiCad absolute millimetres, X right, Y up, bottom-side X not mirrored, KiCad rotations. Check pin 1 / cathode of every polarized part in your placement preview against the assembly drawings in review/.",
     fine.length ? `- Fine-pitch parts (pads ≤ 0.3 mm): ${fine.join(", ")}. Qualify stencil, paste inspection and X-ray where joints are hidden.` : null,
     dnp.length ? `- Do not place: ${dnp.join(", ")}.` : null,
-    consigned.length ? `- Customer-supplied (consigned) parts: ${consigned.join(", ")}.` : null,
+    consigned.length ? `- Customer-supplied (consigned) parts: ${consigned.join(", ")}. Do not buy these; they arrive with the order.` : null,
+    notes.lifecycle.length ? `- Parts not in active production (from our notes): ${notes.lifecycle.map((l) => `${l.ref} ${l.status.toUpperCase()}`).join(", ")}. Tell us before substituting.` : null,
+    alternates.length ? `- Approved alternates: ${alternates.map((e) => `${field(e.f.fields, MPN_FIELDS) || e.f.value} → ${e.n!.alternates!.join(" / ")}`).join("; ")}. Any other substitute needs written approval.` : null,
     "",
     "## Not covered",
     "",

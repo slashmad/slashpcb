@@ -4,6 +4,7 @@
 // obvious contradictions, and remembers what the user verified (invalidated when the part changes).
 import { createHash } from "node:crypto";
 import type { BoardModel, Footprint, SchematicModel } from "../../shared/types";
+import { compareWithReference, loadReference, type FootprintCompare } from "./libfp";
 
 export type PartKind = "diode" | "led" | "transistor" | "ic" | "polarized-cap" | "connector" | "battery" | "crystal" | "other";
 export interface PolarityPin { num: string; name: string; net: string }
@@ -13,6 +14,7 @@ export interface PolarityEntry {
   issues: { level: "error" | "warning" | "info"; text: string }[];
   fingerprint: string;
   verified?: string; // ISO time when the user verified this exact fingerprint
+  library?: FootprintCompare; // comparison with the footprint's own library version
 }
 
 const GND_NET = /(^|\/)(A|D|P|S)?GND|VSS|0V|EARTH|SHIELD/i;
@@ -37,7 +39,8 @@ function classify(f: Footprint): PartKind | null {
 
 const fp = (f: Footprint) => createHash("sha1").update(JSON.stringify([f.lib, f.side, +f.x.toFixed(3), +f.y.toFixed(3), +f.rot.toFixed(2), f.pads.map((p) => [p.num, p.net, +p.x.toFixed(3), +p.y.toFixed(3)])])).digest("hex").slice(0, 16);
 
-export function polarityReview(b: BoardModel | null, verified: Record<string, { fingerprint: string; at: string }> = {}, sch: SchematicModel | null = null): PolarityEntry[] {
+export function polarityReview(b: BoardModel | null, verified: Record<string, { fingerprint: string; at: string }> = {}, sch: SchematicModel | null = null,
+  libs?: { map: Map<string, string>; projectDir: string }): PolarityEntry[] {
   if (!b) return [];
   const out: PolarityEntry[] = [];
   // Pin names from the schematic (all units of a reference); boards often carry no pin functions.
@@ -79,12 +82,24 @@ export function polarityReview(b: BoardModel | null, verified: Record<string, { 
       issues.push({ level: "info", text: "pad functions not named K/A: check which pad is the cathode in the datasheet" });
     }
     if (!f.pads.some((p) => p.num === "1" || p.num === "A1")) issues.push({ level: "info", text: "no pad 1 / A1" });
+    // Compare with the library version of this footprint (catches reversed numbering / unflipped copies
+    // when the library is right; a wrong library needs a land_pattern rule with a trusted reference).
+    let library: FootprintCompare | undefined;
+    if (libs) {
+      const ref = loadReference(f.lib, libs.map, libs.projectDir);
+      if (ref) {
+        library = compareWithReference(f, ref.pads);
+        if (library.status === "numbering") issues.push({ level: "error", text: `pad numbering differs from library ${f.lib}: ${library.swaps?.slice(0, 3).join("; ")}` });
+        else if (library.status === "unflipped") issues.push({ level: "error", text: `bottom-side copy is not mirrored relative to library ${f.lib}` });
+        else if (library.status === "geometry") issues.push({ level: "info", text: `pads differ from library ${f.lib} (${library.detail}); edited or another version` });
+      }
+    }
     const p1 = f.pads.find((p) => p.num === "1" || p.num === "A1");
     const print = fp(f);
     const v = verified[f.ref];
     out.push({
       ref: f.ref, value: f.value, lib: f.lib, side: f.side, x: f.x, y: f.y, rot: f.rot, kind, pins, pad1: p1 ? [p1.x, p1.y] : undefined, issues,
-      fingerprint: print, verified: v && v.fingerprint === print ? v.at : undefined,
+      fingerprint: print, verified: v && v.fingerprint === print ? v.at : undefined, library,
     });
   }
   const order: PartKind[] = ["ic", "transistor", "diode", "led", "polarized-cap", "connector", "battery", "crystal", "other"];

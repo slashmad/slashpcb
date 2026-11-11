@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { BoardModel, Footprint, SchematicModel } from "../../shared/types";
 import { kicadEnv } from "./cli";
+import { layoutMetrics, metricsText, type LayoutMetrics } from "./analysis";
 import { diffDesignRules, loadDesignRules, readDesignRules, rulesText, type DesignRules, type RuleChange } from "./designrules";
 import { parseBoard } from "./pcb";
 import { parseSchematic } from "./sch";
@@ -27,7 +28,7 @@ export interface BoardDiff {
   after: BoardDiff["before"];
 }
 export interface SchDiff { added: string[]; removed: string[]; value: Change[]; footprint: Change[]; fields: (Change & { field: string })[]; sheets: [number, number] }
-export interface RevisionDiff { other: string; label: string; board: BoardDiff | null; schematic: SchDiff | null; rules?: RuleChange[]; ranAt: number }
+export interface RevisionDiff { other: string; label: string; board: BoardDiff | null; schematic: SchDiff | null; rules?: RuleChange[]; metrics?: { before: LayoutMetrics; after: LayoutMetrics }; ranAt: number }
 
 const natural = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 const IGNORE_FIELDS = new Set(["Reference", "Value", "Footprint", "Datasheet", "Description", "ki_fp_filters", "ki_keywords", "ki_description"]);
@@ -96,6 +97,7 @@ export function compareWithFolder(otherDir: string, otherStem: string, cur: { bo
   return {
     other: join(otherDir, otherStem), label: otherStem, ranAt: Date.now(),
     board: ob && cur.board ? diffBoards(ob, cur.board) : null,
+    metrics: ob && cur.board ? { before: layoutMetrics(ob), after: layoutMetrics(cur.board) } : undefined,
     schematic: os && cur.schematic ? diffSchematics(os, cur.schematic) : null,
     rules: curRules ? diffDesignRules(loadDesignRules(join(otherDir, `${otherStem}.kicad_pro`), join(otherDir, `${otherStem}.kicad_dru`)), curRules) : undefined,
   };
@@ -116,7 +118,8 @@ export async function compareWithGit(projectDir: string, pcbRel: string, cur: { 
     const show = (ext: string) => git(top, ["show", `${rev}:${path.replace(/\.kicad_pcb$/i, ext)}`]).catch(() => null);
     rules = diffDesignRules(readDesignRules(await show(".kicad_pro"), await show(".kicad_dru")), curRules);
   }
-  return { other: `${rev}:${path}`, label: `git ${short}`, ranAt: Date.now(), board: cur.board ? diffBoards(ob, cur.board) : null, schematic: null, rules };
+  return { other: `${rev}:${path}`, label: `git ${short}`, ranAt: Date.now(), board: cur.board ? diffBoards(ob, cur.board) : null, schematic: null, rules,
+    metrics: cur.board ? { before: layoutMetrics(ob), after: layoutMetrics(cur.board) } : undefined };
 }
 
 export function diffText(d: RevisionDiff, max = 40): string {
@@ -147,5 +150,6 @@ export function diffText(d: RevisionDiff, max = 40): string {
     list("Symbol fields", s.fields, (c) => `${c.ref}.${c.field} "${c.from}"→"${c.to}"`);
   }
   if (d.rules) L.push(rulesText(d.rules));
+  if (d.metrics) L.push(metricsText(d.metrics.after, d.metrics.before));
   return L.join("\n");
 }

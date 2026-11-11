@@ -6,8 +6,8 @@ import { useT } from "../i18n";
 interface Gate { id: string; title: string; status: "pass" | "warn" | "fail"; detail: string; refs?: string[] }
 interface Preflight { profile: string; ok: boolean; gates: Gate[]; assembled: number; ranAt: number }
 interface Pkg { dir: string; name: string; profile: string; status: string; createdAt: string }
-interface Caps { minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number; thicknesses?: number[]; tenting?: boolean; source?: string }
-const CAP_FIELDS = ["minTrack", "minGap", "minDrill", "minRing", "minViaDiameter"] as const;
+interface Caps { minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number; minMaskWeb?: number; thicknesses?: number[]; tenting?: boolean; source?: string }
+const CAP_FIELDS = ["minTrack", "minGap", "minDrill", "minRing", "minViaDiameter", "minMaskWeb"] as const;
 
 const ICON = { pass: "✓", warn: "▲", fail: "✕" } as const;
 

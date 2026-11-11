@@ -5,7 +5,9 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { maskWebs } from "../src/main/kicad/analysis";
 import { setFields } from "../src/main/kicad/edit";
+import { cleanNote, notesSummary, partKey } from "../src/main/kicad/partnotes";
 import { parseBoard } from "../src/main/kicad/pcb";
 import { parseSchematic } from "../src/main/kicad/sch";
 import { child, children, isList, parseSexpr, pts, type SList } from "../src/main/kicad/sexpr";
@@ -128,6 +130,36 @@ for (const dir of existsSync(root) ? readdirSync(root) : []) {
     if (!readFileSync(join(dir, "net2.xml"), "utf8").includes("MC78L05ACP")) fail("netlist does not carry the new MPN");
     console.log(`  netlist components after edit: ${nl2.comps.size}`);
   }
+}
+
+// Solder-mask webs and sourcing notes on a synthetic board (no samples needed).
+{
+  console.log("mask webs and part notes (synthetic)");
+  const rect = (x: number, y: number, w: number, h: number) => [x - w / 2, y - h / 2, x + w / 2, y - h / 2, x + w / 2, y + h / 2, x - w / 2, y + h / 2];
+  const pad = (num: string, x: number, net: string, maskMargin?: number) => ({ num, type: "smd", shape: "rect", x, y: 0, rot: 0, w: 0.3, h: 1, layers: ["F.Cu", "F.Mask", "F.Paste"], net, polys: [rect(x, 0, 0.3, 1)], maskMargin });
+  const fp = (ref: string, pads: any[], fields: Record<string, string> = {}, maskMargin?: number) => ({ ref, value: "X", lib: "L:X", side: "F", x: 0, y: 0, rot: 0, fields, attrs: ["smd"], bbox: [-1, -1, 1, 1], pads, graphics: [], uuid: ref, path: "", maskMargin });
+  // Pitch 0.5, pad width 0.3: copper gap 0.2. Margin 0.05 each side → web 0.1; margin 0.06 → 0.08 (thin).
+  const board: any = { footprints: [fp("U1", [pad("1", 0, "A", 0.06), pad("2", 0.5, "B", 0.06), pad("3", 1.0, "B")], {}, 0.05)], vias: [], tracks: [], zones: [], copper: ["F.Cu", "B.Cu"], mask: { padToMask: 0, minWidth: 0, bridgesInFootprints: false } };
+  const r = maskWebs(board, 0.1);
+  const w12 = r.webs.find((w) => w.a === "U1.1" && w.b === "U1.2");
+  if (!w12 || Math.abs(w12.web - 0.08) > 1e-6 || w12.kind !== "thin" || w12.allowed) fail(`mask web U1.1/U1.2 expected 0.08 thin, got ${JSON.stringify(w12)}`);
+  const w23 = r.webs.find((w) => w.a === "U1.2" && w.b === "U1.3");
+  if (!w23 || !w23.sameNet || Math.abs(w23.web - 0.09) > 1e-6) fail(`mask web U1.2/U1.3 expected 0.09 same net (pad 0.06 + footprint 0.05), got ${JSON.stringify(w23)}`);
+  if (r.narrowest?.web !== 0.08) fail(`narrowest web ${r.narrowest?.web}`);
+  board.mask.bridgesInFootprints = true;
+  if (!maskWebs(board, 0.1).webs.find((w) => w.a === "U1.1")?.allowed) fail("bridges in footprints not honoured");
+  board.footprints[0].pads[0].maskMargin = -0.05; // mask-defined land
+  if (!maskWebs(board, 0.1).maskDefined.some((m) => m.ref === "U1")) fail("mask-defined land not reported");
+  // Notes: validation, keys, summary.
+  let threw = false;
+  try { cleanNote({ quote: { unitPrice: 1.2, currency: "" } } as any); } catch { threw = true; }
+  if (!threw) fail("a quote without currency must be refused");
+  const n = cleanNote({ lifecycle: "eol", consigned: true, alternates: "A1, A2;A1", leadTimeDays: "12" } as any);
+  if (n.alternates?.length !== 2 || n.leadTimeDays !== 12 || !n.consigned) fail(`cleanNote ${JSON.stringify(n)}`);
+  const parts: any[] = [fp("U2", [], { MPN: "ABC-1" }), fp("U3", [], { MPN: "ABC-1" }), fp("R1", [])];
+  if (partKey(parts[0]) !== "mpn:ABC-1" || partKey(parts[2]) !== "vf:X|L:X") fail("partKey");
+  const s = notesSummary(parts, { "mpn:ABC-1": { lifecycle: "nrnd" }, "vf:X|L:X": { consigned: true } });
+  if (s.lifecycle.length !== 2 || s.missingAlternates.length !== 2 || s.consigned.join() !== "R1") fail(`notesSummary ${JSON.stringify(s)}`);
 }
 
 console.log(failed ? `${failed} failure(s)` : "all checks passed");

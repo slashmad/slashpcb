@@ -9,6 +9,7 @@ import { Board3D } from "./components/Board3D";
 import { BoardView, type BoardHandle } from "./components/BoardView";
 import { LeftPanel, type LeftTab } from "./components/LeftPanel";
 import { LiveMenu } from "./components/LiveMenu";
+import type { RevisionDiff } from "./components/ComparePanel";
 import { SchematicView, type SchematicHandle } from "./components/SchematicView";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SourceDrawer } from "./components/SourceDrawer";
@@ -60,6 +61,7 @@ export function App() {
   const [hl, setHl] = useState<{ refs: string[]; nets: string[] }>({ refs: [], nets: [] });
   const [activeMarker, setActiveMarker] = useState<{ kind: "erc" | "drc"; i: number } | null>(null);
   const [chip, setChip] = useState<string | null>(null);
+  const [compare, setCompare] = useState<RevisionDiff | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [source, setSource] = useState<string | null>(null);
   const [fileVersion, setFileVersion] = useState(0);
@@ -83,7 +85,10 @@ export function App() {
   }, []);
 
   const switchTab = (t: ViewKind) => { setTab(t); try { localStorage.setItem("view-tab", t); } catch { /* none */ } };
-  (window as any).__setTab = switchTab; // test hook
+  (window as any).__setTab = switchTab; // test hooks
+  (window as any).__setLeftTab = setLeftTab;
+  (window as any).__pickRef = (r: string) => pickRef(r);
+  (window as any).__compareGit = async (rev?: string) => { const r = await api.compare.git(rev); if (r?.ok) { setCompare(r.diff); setLeftTab("diffs"); switchTab("board"); } return r; };
 
   useEffect(() => {
     api.info().then((i: any) => {
@@ -99,7 +104,7 @@ export function App() {
     const hlTimer = { id: 0 };
     const offs = [
       api.project.onOpened((p: any) => {
-        setInfo(p.info); setTree(p.tree); setDesign(EMPTY); setDiffs([]); setSelectedRef(null); setBoardSel(null); setActiveMarker(null); setActiveAnn(null);
+        setInfo(p.info); setTree(p.tree); setDesign(EMPTY); setDiffs([]); setCompare(null); setSelectedRef(null); setBoardSel(null); setActiveMarker(null); setActiveAnn(null);
       }),
       api.project.onInfo((i: ProjectInfo) => setInfo(i)),
       api.project.onChanged((c: any) => {
@@ -123,6 +128,7 @@ export function App() {
           api.viewer.snapshotDone(req.reqId, url);
         } catch (e: any) { api.viewer.snapshotDone(req.reqId, null, e?.message ?? String(e)); }
       }),
+      api.compare.onResult((d: RevisionDiff) => { setCompare(d); setLeftTab("diffs"); switchTab("board"); }),
       api.live.onSelection((m: { refs: string[]; nets: string[] }) => {
         const ref = m.refs[0] ?? null;
         setSelectedRef(ref);
@@ -297,6 +303,7 @@ export function App() {
         info={info} tree={tree} design={design} diffs={diffs} tab={leftTab} onTab={setLeftTab}
         selectedRef={selectedRef} selectedNet={boardSel?.ref ? null : boardSel?.net ?? null} activeMarker={activeMarker}
         onOpenFile={setSource} onPickRef={pickRef} onPickNet={pickNet} onPickMarker={pickMarker} onRunChecks={() => api.design.run()}
+        compare={compare} onCompare={(d) => { setCompare(d); if (d) switchTab("board"); }}
       />
       <div className="splitter" onPointerDown={leftDrag} />
       <div className="center">
@@ -318,7 +325,7 @@ export function App() {
           </div>
           <div className={`view ${tab === "board" ? "" : "hidden"}`}>
             <BoardView board={design.board} dark={dark} markers={drc?.violations ?? []} activeMarker={activeMarker?.kind === "drc" ? activeMarker.i : null}
-              annotations={annotations} activeAnnotation={activeAnn} highlightRefs={hl.refs} highlightNets={hl.nets} selection={boardSel} handle={boardH}
+              annotations={annotations} activeAnnotation={activeAnn} highlightRefs={hl.refs} highlightNets={hl.nets} selection={boardSel} handle={boardH} compare={compare}
               onSelect={(h) => { setBoardSel(h); selectRef(h?.ref ?? null); }} onAddAnnotation={addBoardAnnotation} onAsk={setChip} />
           </div>
           <div className={`view ${tab === "3d" ? "" : "hidden"}`}>

@@ -12,6 +12,9 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
   const mount = useRef<HTMLDivElement>(null);
   const three = useRef<{ renderer: THREE.WebGLRenderer; scene: THREE.Scene; camera: THREE.PerspectiveCamera; controls: OrbitControls; model: THREE.Object3D | null; render(): void } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // What to show: solder mask off reveals the copper (like a STEP exported without mask).
+  const [show, setShow] = useState({ mask: true, silk: true, parts: true });
+  const groups = useRef<Record<"mask" | "silk" | "parts", THREE.Object3D[]>>({ mask: [], silk: [], parts: [] });
   const [loading, setLoading] = useState(false);
 
   useEffect(() => { if (active && !glb) api.design.want3d(); }, [active, glb]);
@@ -19,13 +22,18 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
   useEffect(() => {
     const el = mount.current;
     if (!el) return;
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // Logarithmic depth: copper, mask and silk lie 0.01 mm apart on boards 150 mm wide.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
     renderer.setPixelRatio(window.devicePixelRatio || 1);
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // Neutral tone mapping keeps KiCad's hues and contrast (ACES washed them out).
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.toneMappingExposure = 1.0;
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
     const pmrem = new THREE.PMREMGenerator(renderer);
     scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environmentIntensity = 0.35;
     const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 10000);
     camera.up.set(0, 0, 1);
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -34,10 +42,13 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
     controls.zoomToCursor = true;
     const render = () => renderer.render(scene, camera);
     controls.addEventListener("change", render);
-    scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 1.2));
-    const key = new THREE.DirectionalLight(0xffffff, 1.4);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x30343c, 0.8));
+    const key = new THREE.DirectionalLight(0xffffff, 2.2);
     key.position.set(-1, -2, 3);
     scene.add(key);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.5);
+    fill.position.set(2, 1, -2);
+    scene.add(fill);
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth, h = el.clientHeight;
       if (!w || !h) return;
@@ -70,17 +81,64 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
         const first = !th.model;
         if (th.model) th.scene.remove(th.model);
         const m = gltf.scene;
+        // KiCad writes its display colours (sRGB) straight into glTF's baseColorFactor, which glTF
+        // defines as linear. Read as linear, black mask (0.035) showed as dark grey and green as mint.
+        // Convert back so colours match KiCad's own 3D viewer.
+        //
+        // Board materials (copper, finish, mask, silk, core) carry an explicit metallicFactor; component
+        // colours from the 3D models do not, and glTF then defaults to fully metallic, which made plastic
+        // bodies dark or orange. Classify with the raw glTF material entries.
+        const raw: any[] = (gltf.parser as any).json?.materials ?? [];
+        const assoc: Map<any, any> = (gltf.parser as any).associations ?? new Map();
+        const rawOf = (mat: any) => raw[assoc.get(mat)?.materials ?? -1];
+        const isBoardMetal = (mat: any) => { const r = rawOf(mat)?.pbrMetallicRoughness; return r?.metallicFactor !== undefined && r.metallicFactor > 0.5; };
+        const all = new Set<any>();
+        m.traverse((o: any) => { for (const mat of Array.isArray(o.material) ? o.material : o.material ? [o.material] : []) all.add(mat); });
+        // Surface finish colour: the board metal that is not grey (ENIG gold); plain copper (grey) gets it too,
+        // because exposed copper is finished on a real board (edge fingers, pours in mask openings).
+        const finishMat = [...all].find((mat) => isBoardMetal(mat) && mat.color && mat.color.r - mat.color.b > 0.3);
+        for (const mat of all) {
+          const r = rawOf(mat)?.pbrMetallicRoughness;
+          mat.color?.convertSRGBToLinear();
+          if (mat.transparent && mat.opacity < 1) {
+            // Solder mask: a translucent sheet 0.01 mm over the copper. Nearly opaque, and pulled
+            // slightly towards the camera so the copper below cannot show through by depth fighting.
+            mat.opacity = Math.max(mat.opacity, 0.95);
+            mat.depthWrite = true;
+            mat.polygonOffset = true; mat.polygonOffsetFactor = -1; mat.polygonOffsetUnits = -4;
+            mat.roughness = 0.45; mat.envMapIntensity = 0.6;
+          } else if (isBoardMetal(mat)) {
+            if (finishMat && mat !== finishMat && Math.abs(mat.color.r - mat.color.b) < 0.05) mat.color.copy(finishMat.color);
+            mat.metalness = 0.6; mat.roughness = 0.3; mat.envMapIntensity = 1.3;
+          } else if (r?.metallicFactor === undefined) {
+            // Component body from a 3D model: plastic/ceramic unless the model said otherwise.
+            mat.metalness = 0; mat.roughness = 0.6;
+          }
+        }
         // KiCad exports Y-up metres; show Z-up millimetres like the board.
         m.rotation.x = Math.PI / 2;
         m.scale.setScalar(1000);
         th.scene.add(m);
         th.model = m;
+        // Group meshes by what they are, for the Mask / Silk / Parts toggles.
+        const g: Record<"mask" | "silk" | "parts", THREE.Object3D[]> = { mask: [], silk: [], parts: [] };
+        m.traverse((o: any) => {
+          const mat = Array.isArray(o.material) ? o.material[0] : o.material;
+          if (!o.isMesh || !mat) return;
+          const r = rawOf(mat);
+          const pbr = r?.pbrMetallicRoughness;
+          if (r?.alphaMode === "BLEND") g.mask.push(o);
+          else if (pbr?.metallicFactor === undefined) g.parts.push(o);
+          else if (pbr.metallicFactor === 0 && (pbr.roughnessFactor ?? 0) >= 0.85) g.silk.push(o);
+        });
+        groups.current = g;
+        for (const k of Object.keys(g) as (keyof typeof g)[]) for (const o of g[k]) o.visible = showRef.current[k];
         if (first) {
           const box = new THREE.Box3().setFromObject(m);
           const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3()).length();
           th.controls.target.copy(c);
           th.camera.position.set(c.x - s * 0.5, c.y - s * 0.9, c.z + s * 0.8);
-          th.camera.near = s / 1000; th.camera.far = s * 20; th.camera.updateProjectionMatrix();
+          th.camera.near = s / 200; th.camera.far = s * 20; th.camera.updateProjectionMatrix();
           th.controls.update();
         }
         th.render();
@@ -89,6 +147,17 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
     }).catch((e) => { if (live) { setErr(String(e?.message ?? e)); setLoading(false); } });
     return () => { live = false; };
   }, [glb]);
+
+  const showRef = useRef(show);
+  showRef.current = show;
+  const toggle = (k: keyof typeof show) => {
+    const next = { ...show, [k]: !show[k] };
+    setShow(next);
+    for (const o of groups.current[k]) o.visible = next[k];
+    three.current?.render();
+  };
+
+  (window as any).__toggle3d = toggle; // test hook
 
   const viewFrom = (dir: "top" | "bottom" | "iso") => {
     const th = three.current;
@@ -109,6 +178,10 @@ export function Board3D({ glb, active, running, dark }: { glb: string | null; ac
       {(!glb || loading) && <div className="empty-view muted overlay">{running || loading ? <><span className="spinner" /> {t("3d.exporting")}</> : t("3d.none")}</div>}
       {err && <div className="err-msg overlay">{err}</div>}
       <div className="view-tools">
+        <button className={show.mask ? "on" : ""} title={t("3d.maskTitle")} onClick={() => toggle("mask")}>{t("3d.mask")}</button>
+        <button className={show.silk ? "on" : ""} onClick={() => toggle("silk")}>{t("3d.silk")}</button>
+        <button className={show.parts ? "on" : ""} onClick={() => toggle("parts")}>{t("3d.parts")}</button>
+        <span className="sep" />
         <button onClick={() => viewFrom("top")}>{t("board.top")}</button>
         <button onClick={() => viewFrom("bottom")}>{t("board.bottom")}</button>
         <button onClick={() => viewFrom("iso")}>{t("3d.iso")}</button>

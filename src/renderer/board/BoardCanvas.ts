@@ -16,7 +16,15 @@ export interface DrawOptions {
   annotations?: Annotation[];
   activeAnnotation?: string | null;
   unrouted?: [number, number, number, number][]; // ratsnest from DRC's unconnected items
+  compare?: CompareOverlay | null; // differences against another revision
   dark: boolean;
+}
+
+export interface CompareOverlay {
+  moved: { box: [number, number, number, number]; dx: number; dy: number }[]; // box = current position
+  added: [number, number, number, number][];
+  removed: [number, number, number, number][];
+  changed: [number, number, number, number][];
 }
 
 const COPPER_COLORS = ["#c83434", "#c2c200", "#c261c2", "#33a59d", "#d68a2b", "#7f7fe0", "#8fbf4f", "#e06f9e"];
@@ -305,6 +313,31 @@ export function drawBoard(ctx: CanvasRenderingContext2D, scene: BoardScene, v: B
     ctx.beginPath();
     for (const [x1, y1, x2, y2] of o.unrouted) { ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); }
     ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Revision comparison: moved (old position dashed + arrow), added (green), removed (red), changed (orange).
+  if (o.compare) {
+    world();
+    ctx.globalAlpha = 1;
+    const rect = (b: number[], color: string, dash = false, wpx = 2) => {
+      ctx.strokeStyle = color; ctx.lineWidth = wpx * minPx; ctx.setLineDash(dash ? [5 * minPx, 3 * minPx] : []);
+      ctx.strokeRect(b[0], b[1], b[2] - b[0], b[3] - b[1]);
+    };
+    for (const b of o.compare.changed) rect(b, "#ffa53a");
+    for (const b of o.compare.added) rect(b, "#3ddc84", false, 2.5);
+    for (const b of o.compare.removed) {
+      rect(b, "#ff5a5a", true, 2.5);
+      ctx.beginPath(); ctx.moveTo(b[0], b[1]); ctx.lineTo(b[2], b[3]); ctx.moveTo(b[2], b[1]); ctx.lineTo(b[0], b[3]); ctx.stroke();
+    }
+    for (const m of o.compare.moved) {
+      const old = [m.box[0] - m.dx, m.box[1] - m.dy, m.box[2] - m.dx, m.box[3] - m.dy];
+      rect(old, "#4fc3ff", true);
+      rect(m.box, "#4fc3ff");
+      const [ax, ay, bx, by] = [(old[0] + old[2]) / 2, (old[1] + old[3]) / 2, (m.box[0] + m.box[2]) / 2, (m.box[1] + m.box[3]) / 2];
+      ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+      ctx.beginPath(); ctx.arc(bx, by, 3 * minPx, 0, Math.PI * 2); ctx.fillStyle = "#4fc3ff"; ctx.fill();
+    }
     ctx.setLineDash([]);
   }
 

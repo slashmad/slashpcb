@@ -1,0 +1,41 @@
+# Builds installers on native runners. Manual only (Actions › build › Run workflow): release tags are
+# created by hand together with the locally built packages, and macOS runner minutes are expensive.
+name: build
+on:
+  workflow_dispatch:
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            dist: dist:linux
+          - os: windows-2025
+            dist: dist:win
+          - os: macos-15
+            dist: dist:mac
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y rpm libarchive-tools
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run ${{ matrix.dist }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slashpcb-${{ runner.os }}
+          path: |
+            release/*.AppImage
+            release/*.deb
+            release/*.rpm
+            release/*.exe
+            release/*.zip
+            release/*.dmg
+          if-no-files-found: error

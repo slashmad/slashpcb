@@ -2,8 +2,10 @@ import { useMemo, useState } from "react";
 import type { CheckReport, CheckViolation, DesignSnapshot, FileDiff, FileNode, ProjectInfo } from "../../shared/types";
 import { api, fmtTime } from "../api";
 import { useT } from "../i18n";
+import { ComparePanel, type RevisionDiff } from "./ComparePanel";
+import { ReleasePanel } from "./ReleasePanel";
 
-export type LeftTab = "files" | "parts" | "nets" | "checks" | "diffs";
+export type LeftTab = "files" | "parts" | "nets" | "checks" | "release" | "diffs";
 
 interface Props {
   info: ProjectInfo;
@@ -20,6 +22,8 @@ interface Props {
   onPickNet(net: string): void;
   onPickMarker(kind: "erc" | "drc", i: number, v: CheckViolation): void;
   onRunChecks(): void;
+  compare: RevisionDiff | null;
+  onCompare(d: RevisionDiff | null): void;
 }
 
 function FileTree({ node, onOpen, depth = 0 }: { node: FileNode; onOpen(p: string): void; depth?: number }) {
@@ -174,6 +178,7 @@ export function LeftPanel(p: Props) {
         {tab("parts", t("left.parts"))}
         {tab("nets", t("left.nets"))}
         {tab("checks", t("left.checks"), errs ? <span className="count bad">{errs}</span> : warns ? <span className="count warn">{warns}</span> : null)}
+        {tab("release", t("left.release"))}
         {tab("diffs", t("left.diffs"), p.diffs.length ? <span className="count">{p.diffs.length}</span> : null)}
       </div>
       <div className="tab-body">
@@ -188,7 +193,11 @@ export function LeftPanel(p: Props) {
             {d.errors.length > 0 && <div className="err-msg">{d.errors.join("\n")}</div>}
           </div>
         )}
-        {p.tab === "diffs" && <Diffs diffs={p.diffs} onOpen={p.onOpenFile} />}
+        {p.tab === "release" && <ReleasePanel onPickRef={p.onPickRef} version={d.n} />}
+        {p.tab === "diffs" && <>
+          <ComparePanel diff={p.compare} onDiff={p.onCompare} onPickRef={p.onPickRef} />
+          <Diffs diffs={p.diffs} onOpen={p.onOpenFile} />
+        </>}
       </div>
     </div>
   );

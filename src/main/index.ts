@@ -6,6 +6,7 @@ import type { AgentEvent, AgentKind, DesignSnapshot, HighlightRequest, Permissio
 import { AgentSession } from "./agents/base";
 import { claudeAuthStatus, claudeLogin, codexAuthStatus, codexLogin, writeLoginInput } from "./agents/auth";
 import { pickBinary } from "./agents/binaries";
+import { READ_ONLY_TOOLS } from "./agents/prompt";
 import { ClaudeSession, listClaudeSessions, loadClaudeHistory } from "./agents/claude";
 import { CodexSession, listCodexSessions } from "./agents/codex";
 import { Annotations } from "./annotations";
@@ -15,6 +16,9 @@ import { detectKicad, openInKicad } from "./kicad/cli";
 import { McpHub } from "./mcpHub";
 import { KicadProject, resolveProject } from "./project";
 import { getSettings, rememberProject, setSettings } from "./settings";
+import { compareWithFolder, compareWithGit } from "./kicad/compare";
+import { PROFILES } from "./kicad/release";
+import { defaultReleaseDir, listPackages, runPreflight, runRelease } from "./releases";
 import { registerTools } from "./tools";
 
 // ---------------------------------------------------------------- data folder
@@ -254,6 +258,35 @@ function registerIpc(): void {
     try { await bridge.request("select", { refs, board: project?.info.pcb }); return true; } catch { return false; }
   });
 
+  ipcMain.handle("compare:folder", async () => {
+    if (!project) return null;
+    const r = await dialog.showOpenDialog(win!, { title: "Compare with another revision (KiCad project or folder)", defaultPath: join(project.dir, ".."),
+      properties: ["openFile", "openDirectory"], filters: [{ name: "KiCad", extensions: ["kicad_pro", "kicad_pcb", "kicad_sch"] }] });
+    if (r.canceled || !r.filePaths[0]) return null;
+    const res = resolveProject(r.filePaths[0]);
+    if (!res) return { ok: false, error: "No KiCad project there." };
+    try { return { ok: true, diff: compareWithFolder(res.dir, res.pro.replace(/\.kicad_pro$/i, ""), project.design) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  });
+  ipcMain.handle("compare:git", async (_e, rev?: string) => {
+    if (!project?.info.pcb) return null;
+    try { return { ok: true, diff: await compareWithGit(project.dir, project.info.pcb, project.design, rev || "HEAD") }; } catch (e: any) { return { ok: false, error: `Not a Git repository or no such revision (${(e?.message ?? String(e)).split("\n")[0]})` }; }
+  });
+
+  ipcMain.handle("release:profiles", () => PROFILES.map((p) => ({ id: p.id, name: p.name, note: p.note })));
+  ipcMain.handle("release:preflight", (_e, profile: string, fresh?: boolean) => (project ? runPreflight(project, profile, !!fresh) : null));
+  ipcMain.handle("release:list", () => (project ? listPackages(project) : []));
+  ipcMain.handle("release:export", async (_e, profile: string, choose?: boolean) => {
+    if (!project) return null;
+    let out: string | undefined;
+    if (choose) {
+      const r = await dialog.showOpenDialog(win!, { title: "Choose an empty folder for the package", defaultPath: defaultReleaseDir(project, profile), properties: ["openDirectory", "createDirectory", "promptToCreate"] });
+      if (r.canceled || !r.filePaths[0]) return null;
+      out = r.filePaths[0];
+    }
+    try { return { ok: true, result: await runRelease(project, profile, app.getVersion(), out) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  });
+  ipcMain.handle("release:reveal", (_e, dir: string) => shell.openPath(dir));
+
   ipcMain.handle("design:run", () => project?.request("manual") ?? null);
   ipcMain.handle("design:want3d", (_e, force?: boolean) => (project ? (force ? project.request("3d", { checks: false, glb: true }) : project.request3d()) : null));
   ipcMain.handle("design:file", (_e, path: string) => readOutput(path));
@@ -328,6 +361,8 @@ app.whenReady().then(async () => {
     project: () => project, annotations: () => annotations, snapshot,
     highlight: (h: HighlightRequest) => send("viewer:highlight", h),
     bridge: () => (getSettings().liveLink ? bridge : null),
+    appVersion: app.getVersion(),
+    showCompare: (d) => send("compare:result", d),
   });
   bridge.on("status", () => send("live:status", liveStatus()));
   bridge.on("selection", (m: { board: string; refs: string[]; nets: string[] }) => {
@@ -337,6 +372,7 @@ app.whenReady().then(async () => {
     setTimeout(() => { kicadSelecting = false; }, 800);
   });
   if (getSettings().liveLink) bridge.start();
+  for (const t of READ_ONLY_TOOLS) hub.readOnly.add(t);
   try { await hub.start(); } catch (e) { console.error("MCP hub:", e); }
   hub.on("activity", (a) => send("mcp:activity", a));
   void detectKicad(getSettings().kicadCliPath);
@@ -352,6 +388,8 @@ app.whenReady().then(async () => {
       try {
         if (process.env.SLASHPCB_TAB) await win!.webContents.executeJavaScript(`window.__setTab && window.__setTab(${JSON.stringify(process.env.SLASHPCB_TAB)})`);
         await new Promise((r) => setTimeout(r, Number(process.env.SLASHPCB_TAB_DELAY_MS ?? 2500)));
+        // SLASHPCB_TEST_JS runs in the window before the screenshot (e.g. "__toggle3d('mask')").
+        if (process.env.SLASHPCB_TEST_JS) { await win!.webContents.executeJavaScript(process.env.SLASHPCB_TEST_JS); await new Promise((r) => setTimeout(r, 800)); }
         writeFileSync(shot, (await win!.webContents.capturePage()).toPNG());
         console.log(`screenshot written: ${shot}`);
         for (const view of ["board", "schematic"] as const) {

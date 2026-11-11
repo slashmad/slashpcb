@@ -14,7 +14,15 @@ SlashPCB puts live schematic, board and 3D views of a KiCad project between you 
 
 SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is a cockpit around KiCad: **KiCad stays the editor, and its files stay the source of truth.**
 
-> Status: early (0.2). Review-first: the agents read the design, run checks, highlight and render. Changes go through KiCad's own editor (live link, undoable there) or small field edits you approve.
+> Status: early (0.4). Review-first: the agents read the design, run checks, highlight and render. Changes go through KiCad's own editor (live link, undoable there) or small field edits you approve.
+
+| Board, with a part selected | Schematic with background ERC/DRC |
+|---|---|
+| ![Board view](docs/screenshots/board.png) | ![Schematic view](docs/screenshots/schematic.png) |
+| **3D with mask, silkscreen and parts toggles** | **Release package preflight (JLCPCB)** |
+| ![3D view](docs/screenshots/3d.png) | ![Release tab](docs/screenshots/release.png) |
+
+<sub>Screenshots show StickHub, a KiCad demo project by Stefan Hamminga (rbts.co), CC BY-NC-SA 4.0. See [docs/screenshots](docs/screenshots/README.md).</sub>
 
 ## What it does
 
@@ -26,12 +34,35 @@ SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is
 - **Cross-probes:** a part picked in a list, the schematic or the board is selected everywhere.
 - **Markers:** right-click anywhere to place a numbered marker with a task for the agent.
 - **Agent chat** with Claude Code or Codex on your own subscription. The agents get a local MCP server with KiCad-aware tools:
-  `get_design`, `list_components`, `get_component`, `list_nets`, `get_net`, `run_checks`, `render_view` (board, schematic sheet or 3D render), `highlight`, `list_annotations`, `resolve_annotation`. With the live link, they also get `kicad_live_status`, `kicad_select`, `kicad_move`, `kicad_set_value`, `kicad_refill_zones` and `kicad_save`, plus `set_fields` for file edits.
+  `get_design`, `list_components`, `get_component`, `list_nets`, `get_net`, `run_checks`, `render_view` (board, schematic sheet or 3D render), `highlight`, `list_annotations`, `resolve_annotation`. With the live link, they also get `kicad_live_status`, `kicad_select`, `kicad_move`, `kicad_set_value`, `kicad_refill_zones` and `kicad_save`, plus `set_fields` for file edits, `release_preflight`, `export_release` and `list_releases` for packages, and `compare_revision`. Both Claude and Codex run the read-only tools without asking and ask you before any change.
 - **Live link to KiCad (optional):** through KiCad's IPC API (kicad-python). It mirrors selection between KiCad's PCB editor and SlashPCB. Agents can select, move or rotate footprints and change values in the open editor. Each change is one undo step in KiCad, and nothing is saved unless you ask. Turn it on under **KiCad live** in the top bar. **Set up live link** creates a Python environment in SlashPCB's data folder and installs `kicad-python`. You start that step yourself, and it is the only one that uses the network.
 - **Field edits:** `set_fields` writes MPN, LCSC, Value or any other field into the schematic, and optionally onto the board footprints. Each edit changes only the bytes of that property and writes atomically, and DRC parity reports any remaining mismatch. Edits are refused for frozen projects and for files open in KiCad.
+- **Release packages** (Release tab, or the agent tools `release_preflight` and `export_release`). Profiles cover JLCPCB, PCBWay and generic KiCad output. A preflight blocks a package when the board fails ERC, DRC, unrouted, parity or outline checks, or when part numbers are missing. It also warns about paste on THT pads, bottom-side assembly and footprints that look like parts but have no paste. The export writes a Gerber and Excellon zip, a BOM and a CPL in the supplier's columns (with JLCPCB rotation offsets), and a `MANIFEST.json` with SHA-256 hashes. A failed preflight is recorded in the package as `PREFLIGHT_FAILED_DO_NOT_ORDER`. Board-only footprints such as key contacts, test pads and edge fingers (no paste, no holes) are kept out of the BOM and CPL.
+- **3D view** with KiCad's colours (black mask stays black, ENIG stays gold) and toggles for mask, silkscreen and parts. Hide the mask to see the copper.
+- **Revision comparison** (Changes tab, or the agent tool `compare_revision`) against another revision folder or a Git commit. It lists added, removed, moved, rotated and flipped parts, plus value, footprint, field and pad-net changes and board totals, and marks them on the board. The other revision is only read.
 - **Unrouted connections** from DRC are drawn on the board like a ratsnest. Double-click a sheet symbol to enter the sheet.
 - **Approvals:** read-only tools run freely. Tools that change something ask you first in the chat.
 - **Safety for released designs:** a project with a release marker (`*FINAL_MANIFEST*.json`, `FROZEN`) or a read-only folder is shown as **frozen**, and agents are told never to edit it. Open KiCad editors are detected from KiCad's lock files.
+
+## Install
+
+Download a package from the [Releases](../../releases) page:
+
+| System  | File | Notes |
+|---------|------|-------|
+| Linux   | `SlashPCB-<version>-x86_64.AppImage` | `chmod +x` and run. Adds itself to the application menu on first start. |
+| Debian, Ubuntu | `slashpcb_<version>_amd64.deb` | `sudo apt install ./slashpcb_<version>_amd64.deb` |
+| Fedora, openSUSE | `slashpcb-<version>.x86_64.rpm` | `sudo dnf install ./slashpcb-<version>.x86_64.rpm` |
+| Windows | `SlashPCB-Setup-<version>.exe` | Installer (per user, choice of folder). |
+| Windows | `SlashPCB-Portable-<version>.exe` | Single exe; keeps its settings in `SlashPCB-data` next to it. |
+| Windows | `SlashPCB-<version>-win-x64.zip` | Unzip and run `slashpcb.exe`; starts faster than the portable exe. |
+
+SlashPCB does not bundle KiCad or the agents. You need:
+
+- **KiCad 9 or 10.** SlashPCB finds `kicad-cli` in the usual install locations (Linux packages and Flatpak, `C:\Program Files\KiCad\<version>\bin`, the macOS app bundle) or in *Settings › KiCad*.
+- At least one agent CLI, installed and logged in: **Claude Code** with a Claude subscription, or **Codex** with a ChatGPT login. The CLIs and the VS Code extensions both work, and SlashPCB finds them the same way SlashCAD does.
+
+Windows packages are cross-built on Linux and have had less testing than the Linux packages.
 
 ## How it works
 
@@ -67,7 +98,10 @@ npm start                 # Wayland first on Linux, X11 fallback
 npm run typecheck
 npm test                  # parser checks against kicad-cli netlists (needs samples/ and kicad-cli)
 npm run dist:linux        # AppImage, deb, rpm
+npm run dist:win          # Setup, portable exe, zip (cross-builds on Linux)
 ```
+
+macOS packages are built by the manual GitHub Actions workflow (`.github/workflows/build.yml`).
 
 ## Layout
 

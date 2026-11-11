@@ -1,14 +1,17 @@
 // KiCad design tools exposed to agents through the MCP hub. Phase 1: read-only plus renders.
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { BoardModel, Footprint, HighlightRequest, SchSymbol, SnapshotRequest } from "../shared/types";
 import { Annotations } from "./annotations";
 import type { KicadBridge } from "./kicad/bridge";
 import { summarizeReport } from "./kicad/checks";
+import { compareWithFolder, compareWithGit, diffText } from "./kicad/compare";
 import { setFields } from "./kicad/edit";
+import { PROFILES } from "./kicad/release";
+import { listPackages, preflightText, releaseRoot, runPreflight, runRelease } from "./releases";
 import { runCli } from "./kicad/cli";
 import type { McpHub, ToolResult } from "./mcpHub";
-import type { KicadProject } from "./project";
+import { resolveProject, type KicadProject } from "./project";
 
 export interface ToolContext {
   project(): KicadProject | null;
@@ -16,6 +19,8 @@ export interface ToolContext {
   snapshot(req: Omit<SnapshotRequest, "reqId">): Promise<string>; // data URL (PNG)
   highlight(req: HighlightRequest): void;
   bridge(): KicadBridge | null; // null when the live link is off
+  appVersion: string;
+  showCompare(d: unknown): void;
 }
 
 const text = (t: string, isError = false): ToolResult => ({ content: [{ type: "text", text: t }], isError });
@@ -392,6 +397,65 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
       return text(out.join("\n"));
     },
     summarize: (a) => `Fields on ${(a.refs ?? []).join(", ")}`,
+  });
+
+  // ---------------------------------------------------------------- release packages
+  hub.register("release_preflight", {
+    description: `Check whether the board is ready for a fabrication/assembly package for a supplier profile (${PROFILES.map((x) => x.id).join(", ")}): ERC/DRC, unrouted, schematic parity, parts inside the outline, paste on THT pads, unique references, part numbers, bottom-side assembly. Runs fresh checks. Read-only.`,
+    inputSchema: { type: "object", properties: { profile: { type: "string", enum: PROFILES.map((x) => x.id) } } },
+    async run(a) {
+      const p = need();
+      const pf = await runPreflight(p, a.profile ?? "jlcpcb", true);
+      return text(preflightText(pf), !pf.ok);
+    },
+    summarize: (a, r) => `Preflight ${a.profile ?? "jlcpcb"}${r.isError ? ": blocked" : ": ok"}`,
+  });
+
+  hub.register("export_release", {
+    description: "Write a fabrication/assembly package for a supplier profile: Gerber + Excellon zip, BOM and CPL in the supplier's columns, KiCad position file, MANIFEST.json with SHA-256 hashes and README.txt. Goes to <project>/fab/<name> (frozen projects: SlashPCB's own data folder). The package is never a release by itself; a failed preflight is written into it as PREFLIGHT_FAILED_DO_NOT_ORDER. Only when the user asked for a package.",
+    inputSchema: { type: "object", properties: { profile: { type: "string", enum: PROFILES.map((x) => x.id) } }, required: ["profile"] },
+    async run(a) {
+      const p = need();
+      const r = await runRelease(p, a.profile, ctx.appVersion);
+      return text([`Package written in ${r.seconds.toFixed(1)} s: ${r.dir}`, ...r.files.map((f) => `  ${f.slice(r.dir.length + 1)}`), "", preflightText(r.preflight)].join("\n"), !r.preflight.ok);
+    },
+    summarize: (a) => `Package ${a.profile}`,
+  });
+
+  hub.register("list_releases", {
+    description: "Packages made earlier for this project (folder, profile, status, time).",
+    inputSchema: { type: "object", properties: {} },
+    async run() {
+      const p = need();
+      const l = listPackages(p);
+      return text(l.length ? l.map((x) => `${x.createdAt}  ${x.profile}  ${x.status}  ${x.dir}`).join("\n") : `No packages yet (they go to ${releaseRoot(p)}).`);
+    },
+  });
+
+  // ---------------------------------------------------------------- revision comparison
+  hub.register("compare_revision", {
+    description: "Compare the open design with another revision: a KiCad project folder or file (e.g. the previous revision folder next to this one), or a Git revision of this project's repository (default HEAD). Lists added/removed/moved/rotated/flipped parts, value, footprint and field changes, pad-net changes, nets added/removed, and board/track/via totals. Read-only: the other revision is only parsed. The result is also shown in the user's board view.",
+    inputSchema: { type: "object", properties: {
+      path: { type: "string", description: "Other revision: folder, .kicad_pro, .kicad_pcb or .kicad_sch (absolute or relative to this project's folder)" },
+      git_rev: { type: "string", description: "Instead of path: a Git revision such as HEAD or HEAD~3" },
+      max: { type: "integer", minimum: 5, maximum: 500 },
+    } },
+    async run(a) {
+      const p = need();
+      let d;
+      if (a.git_rev || !a.path) {
+        if (!p.info.pcb) return text("No board in this project.", true);
+        d = await compareWithGit(p.dir, p.info.pcb, p.design, String(a.git_rev ?? "HEAD"));
+      } else {
+        const target = isAbsolute(String(a.path)) ? String(a.path) : join(p.dir, String(a.path));
+        const r = resolveProject(target);
+        if (!r) return text(`No KiCad project at ${target}.`, true);
+        d = compareWithFolder(r.dir, r.pro.replace(/\.kicad_pro$/i, ""), p.design);
+      }
+      ctx.showCompare(d);
+      return text(diffText(d, a.max ?? 40));
+    },
+    summarize: (a) => `Compare ${a.git_rev ?? a.path ?? "HEAD"}`,
   });
 
   hub.register("list_annotations", {

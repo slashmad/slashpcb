@@ -1,6 +1,6 @@
 # Third-party notices
 
-SlashPCB 0.2.0 is MIT-licensed (see LICENSE). Its installers and archives also contain the third-party
+SlashPCB 0.4.0 is MIT-licensed (see LICENSE). Its installers and archives also contain the third-party
 software below, each under its own licence. Electron and Chromium licence texts ship as `LICENSE.electron.txt` and
 `LICENSES.chromium.html` next to the executable.
 

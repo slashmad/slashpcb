@@ -36,6 +36,18 @@ const api = {
     onUpdate: on("design:update"),
     onState: on("design:state"),
   },
+  compare: {
+    folder: () => ipcRenderer.invoke("compare:folder"),
+    git: (rev?: string) => ipcRenderer.invoke("compare:git", rev),
+    onResult: on("compare:result"),
+  },
+  release: {
+    profiles: () => ipcRenderer.invoke("release:profiles"),
+    preflight: (profile: string, fresh?: boolean) => ipcRenderer.invoke("release:preflight", profile, fresh),
+    list: () => ipcRenderer.invoke("release:list"),
+    export: (profile: string, choose?: boolean) => ipcRenderer.invoke("release:export", profile, choose),
+    reveal: (dir: string) => ipcRenderer.invoke("release:reveal", dir),
+  },
   live: {
     status: () => ipcRenderer.invoke("live:status"),
     enable: (on: boolean) => ipcRenderer.invoke("live:enable", on),

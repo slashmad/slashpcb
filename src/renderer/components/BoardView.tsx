@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { Annotation, BoardModel, CheckViolation, SnapshotRequest } from "../../shared/types";
+import type { RevisionDiff } from "./ComparePanel";
 import { BoardScene, canon, drawBoard, fitView, layerColor, toBoard, type BoardHit, type BoardView as View } from "../board/BoardCanvas";
 import { useT } from "../i18n";
 
@@ -19,6 +20,7 @@ interface Props {
   highlightRefs: string[];
   highlightNets: string[];
   selection: BoardHit | null;
+  compare?: RevisionDiff | null;
   onSelect(h: BoardHit | null): void;
   onAddAnnotation(h: BoardHit, layer: string): void;
   onAsk(chip: string): void;
@@ -37,6 +39,20 @@ export function BoardView(p: Props) {
   const [visible, setVisible] = useState<Set<string>>(new Set());
   const [cursor, setCursor] = useState<[number, number] | null>(null);
   const [showUnrouted, setShowUnrouted] = useState(true);
+  const compareOverlay = useMemo(() => {
+    const d = p.compare?.board;
+    if (!d || !p.board) return null;
+    const box = new Map(p.board.footprints.map((f) => [f.ref, f.bbox]));
+    const get = (r: string) => box.get(r);
+    const changedRefs = new Set([...d.value, ...d.footprint, ...d.fields, ...d.padNets, ...d.rotated].map((c) => c.ref).concat(d.flipped));
+    const movedRefs = new Set(d.moved.map((m) => m.ref));
+    return {
+      moved: d.moved.flatMap((m) => { const b = get(m.ref); return b ? [{ box: b, dx: m.dx, dy: m.dy }] : []; }),
+      added: d.added.flatMap((r) => { const b = get(r); return b ? [b] : []; }),
+      removed: d.removed.map((r) => r.bbox),
+      changed: [...changedRefs].filter((r) => !movedRefs.has(r)).flatMap((r) => { const b = get(r); return b ? [b] : []; }),
+    };
+  }, [p.compare, p.board]);
   const unrouted = useMemo(() => p.markers.filter((m) => m.source === "unconnected").flatMap((m) => {
     const pts = m.items.filter((it) => it.x !== undefined && it.y !== undefined);
     return pts.length >= 2 ? [[pts[0].x!, pts[0].y!, pts[1].x!, pts[1].y!] as [number, number, number, number]] : [];
@@ -85,9 +101,10 @@ export function BoardView(p: Props) {
       selectedRef: p.selection?.ref ?? null, selectedNet: p.selection?.ref ? null : p.selection?.net ?? null,
       markers: p.markers, activeMarker: p.activeMarker, annotations: p.annotations, activeAnnotation: p.activeAnnotation, dark: p.dark,
       unrouted: showUnrouted ? unrouted : [],
+      compare: compareOverlay,
     }, dpr));
     return () => cancelAnimationFrame(raf);
-  }, [scene, v?.cx, v?.cy, v?.scale, size, visible, side, p.highlightRefs, p.highlightNets, p.selection, p.markers, p.activeMarker, p.annotations, p.activeAnnotation, p.dark, showUnrouted, unrouted]);
+  }, [scene, v?.cx, v?.cy, v?.scale, size, visible, side, p.highlightRefs, p.highlightNets, p.selection, p.markers, p.activeMarker, p.annotations, p.activeAnnotation, p.dark, showUnrouted, unrouted, compareOverlay]);
 
   const bboxOf = (refs: string[], nets: string[] = []): [number, number, number, number] | null => {
     if (!p.board) return null;
@@ -124,7 +141,7 @@ export function BoardView(p: Props) {
       const vis = req.layers?.length ? new Set(req.layers.map(canon)) : visible;
       drawBoard(g, scene, fitView(b, req.width, req.height, 0.9), req.width, req.height, {
         visible: vis, side: req.side ?? "top", highlightRefs: new Set(req.highlightRefs ?? []), highlightNets: new Set(req.highlightNets ?? []),
-        markers: p.markers, annotations: p.annotations, dark: true, unrouted,
+        markers: p.markers, annotations: p.annotations, dark: true, unrouted, compare: compareOverlay,
       });
       return c.toDataURL("image/png");
     },

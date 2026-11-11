@@ -52,8 +52,14 @@ export class McpHub extends EventEmitter {
     this.tools.set(name, impl);
   }
 
+  /** Names of tools that never change files or KiCad state (MCP annotations.readOnlyHint). */
+  readOnly = new Set<string>();
+
   listTools() {
-    return [...this.tools.entries()].map(([name, t]) => ({ name, description: t.description, inputSchema: t.inputSchema }));
+    return [...this.tools.entries()].map(([name, t]) => ({
+      name, description: t.description, inputSchema: t.inputSchema,
+      annotations: this.readOnly.has(name) ? { readOnlyHint: true } : { readOnlyHint: false, destructiveHint: false },
+    }));
   }
 
   /**

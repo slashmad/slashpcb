@@ -1,6 +1,16 @@
-# SlashPCB
+<p align="center">
+  <img src="build/icons/256x256.png" width="160" alt="SlashPCB icon">
+</p>
 
-A local workbench for KiCad projects where AI agents (Claude Code and Codex) review schematics and boards while you watch live schematic, board and 3D views, and steer them by clicking and marking.
+<h1 align="center">SlashPCB</h1>
+
+<p align="center">
+  A local workbench for KiCad projects where AI agents review your schematics and boards while you watch, steer and mark.
+</p>
+
+---
+
+SlashPCB puts live schematic, board and 3D views of a KiCad project between you and an AI agent (**Claude Code** or **ChatGPT (Codex)**, on your own subscription). The agent reads the design, runs checks, highlights what it talks about and, when you ask, makes small changes you approve.
 
 SlashPCB is a sibling of [SlashCAD](https://github.com/slashmad/slashcad). It is a cockpit around KiCad: **KiCad stays the editor, and its files stay the source of truth.**
 
@@ -74,3 +84,10 @@ npm run dist:linux        # AppImage, deb, rpm
 ## Licence
 
 MIT. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+## Support
+
+Like SlashPCB? Buy me a beer 🍺
+
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-buy%20me%20a%20beer-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/slashmad)
+[![Liberapay](https://img.shields.io/badge/Liberapay-donate-F6C915?logo=liberapay&logoColor=black)](https://liberapay.com/slashmad/)

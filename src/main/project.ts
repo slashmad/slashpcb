@@ -9,6 +9,9 @@ import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync
 import { basename, dirname, join, relative, sep } from "node:path";
 import type { CheckReport, DesignSnapshot, FileDiff, FileNode, KicadLock, PipelineState, ProjectInfo } from "../shared/types";
 import { runDrc, runErc } from "./kicad/checks";
+import { loadDesignRules, type DesignRules } from "./kicad/designrules";
+import { evaluateRules, newRuleId, prepareRule, readRules, rulesFileName, writeRules, type Rule } from "./kicad/invariants";
+import { polarityReview, type PolarityEntry } from "./kicad/polarity";
 import { runCli } from "./kicad/cli";
 import { parseBoard } from "./kicad/pcb";
 import { assignSheetSvgs, parseSchematic } from "./kicad/sch";
@@ -17,7 +20,7 @@ import { makeDiff } from "./diff";
 
 const IGNORE = new Set([".git", "node_modules", ".venv", "venv", "__pycache__", ".history"]);
 const TEXT_EXT = [".kicad_sch", ".kicad_pcb", ".kicad_pro", ".kicad_dru", ".kicad_sym", ".md", ".txt", ".json", ".csv", ".py", ".yaml", ".yml", ".toml"];
-const DESIGN_RE = /\.kicad_(sch|pcb|pro|dru)$/i;
+const DESIGN_RE = /\.kicad_(sch|pcb|pro|dru)$|(^|\/)slashpcb\.rules\.json$/i;
 const MAX_TEXT = 6_000_000;
 const MAX_TREE_NODES = 4000;
 const MAX_TREE_DEPTH = 6;
@@ -56,7 +59,7 @@ export class KicadProject extends EventEmitter {
   readonly shadowDir: string;
   readonly outDir: string;
   info: ProjectInfo;
-  design: DesignSnapshot = { n: 0, board: null, schematic: null, erc: null, drc: null, glb: null, errors: [] };
+  design: DesignSnapshot = { n: 0, board: null, schematic: null, erc: null, drc: null, rules: null, rulesFile: null, glb: null, errors: [] };
   state: PipelineState = { running: false, n: 0 };
   private watcher: FSWatcher | null = null;
   private pending = new Set<string>();
@@ -281,6 +284,7 @@ export class KicadProject extends EventEmitter {
     if (d.schematic && this.design.schematic) {
       for (const s of d.schematic.sheets) s.svg = this.design.schematic.sheets.find((o) => o.path === s.path)?.svg ?? null;
     }
+    this.evaluateRulesInto(d);
     this.design = { ...d };
     this.emit("design", this.design, "parse");
 
@@ -333,6 +337,68 @@ export class KicadProject extends EventEmitter {
     this.emit("design", this.design, "done");
     this.emit("state", this.state);
     return this.design;
+  }
+
+  // ------------------------------------------------------------ design rules, invariants, polarity
+
+  designRules(): DesignRules {
+    return loadDesignRules(join(this.dir, this.pro), join(this.dir, `${this.stem}.kicad_dru`));
+  }
+
+  /** Rules live in the project unless it is frozen/read-only; then in SlashPCB's state folder. */
+  rulesWritePath(): string {
+    return this.info.frozen || !this.info.writable ? join(this.stateDir, "rules.json") : join(this.dir, rulesFileName);
+  }
+
+  rulesData() {
+    return readRules([join(this.dir, rulesFileName), join(this.stateDir, "rules.json")]);
+  }
+
+  private evaluateRulesInto(d: DesignSnapshot): void {
+    try {
+      const { file, data } = this.rulesData();
+      d.rules = data.rules.length ? evaluateRules(file, data, d.board, d.schematic, this.designRules()) : null;
+      d.rulesFile = file;
+    } catch (e: any) { d.errors.push(`rules: ${e?.message ?? e}`); }
+  }
+
+  addRule(r: Omit<Rule, "id"> & { id?: string }): Rule {
+    const { file, data } = this.rulesData();
+    const target = file && !(file.startsWith(this.dir) && (this.info.frozen || !this.info.writable)) ? file : this.rulesWritePath();
+    const rule = prepareRule({ ...r, id: r.id ?? newRuleId(data.rules) } as Rule, this.design.board, this.designRules());
+    data.rules = [...data.rules.filter((x) => x.id !== rule.id), rule];
+    writeRules(target, data);
+    return rule;
+  }
+
+  removeRule(id: string): boolean {
+    const { file, data } = this.rulesData();
+    if (!file) return false;
+    const n = data.rules.length;
+    data.rules = data.rules.filter((r) => r.id !== id);
+    if (data.rules.length === n) return false;
+    writeRules(file, data);
+    return true;
+  }
+
+  /** Re-evaluate invariants without a full pipeline run (after rule edits). */
+  refreshRules(): void {
+    const d = { ...this.design, errors: [...this.design.errors] };
+    this.evaluateRulesInto(d);
+    this.design = d;
+    this.emit("design", this.design, "rules");
+  }
+
+  private polarityFile() { return join(this.stateDir, "polarity.json"); }
+  private polarityVerified(): Record<string, { fingerprint: string; at: string }> {
+    try { return JSON.parse(readFileSync(this.polarityFile(), "utf8")); } catch { return {}; }
+  }
+  polarity(): PolarityEntry[] { return polarityReview(this.design.board, this.polarityVerified(), this.design.schematic); }
+  setPolarityVerified(ref: string, fingerprint: string | null): PolarityEntry[] {
+    const v = this.polarityVerified();
+    if (fingerprint) v[ref] = { fingerprint, at: new Date().toISOString() }; else delete v[ref];
+    writeFileSync(this.polarityFile(), JSON.stringify(v, null, 1));
+    return this.polarity();
   }
 
   /** Keep the newest runs that the current snapshot still references. */

@@ -40,7 +40,7 @@ function useSplitter(initial: number, min: number, max: number, side: "left" | "
   return [w, start] as const;
 }
 
-const EMPTY: DesignSnapshot = { n: 0, board: null, schematic: null, erc: null, drc: null, glb: null, errors: [] };
+const EMPTY: DesignSnapshot = { n: 0, board: null, schematic: null, erc: null, drc: null, rules: null, rulesFile: null, glb: null, errors: [] };
 
 export function App() {
   const [appInfo, setAppInfo] = useState<any>(null);

@@ -3,7 +3,8 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { detectKicad } from "./kicad/cli";
-import { exportRelease, preflight, PROFILES, type Preflight, type ReleaseResult } from "./kicad/release";
+import { exportRelease, preflight, PROFILES, type Preflight, type PreflightExtras, type ReleaseResult } from "./kicad/release";
+import { getSettings } from "./settings";
 import type { KicadProject } from "./project";
 
 export interface PackageInfo { dir: string; name: string; profile: string; status: string; createdAt: string }
@@ -19,13 +20,27 @@ export function defaultReleaseDir(p: KicadProject, profileId: string): string {
   return join(releaseRoot(p), `${p.stem}-${profileId}-${stamp()}`);
 }
 
+/** Everything the preflight needs beyond ERC/DRC: invariants, polarity, suppressed checks, limits. */
+export function preflightExtras(p: KicadProject, profileId: string): PreflightExtras {
+  const dr = p.designRules();
+  const pol = p.polarity();
+  return {
+    rules: p.design.rules,
+    ignoredChecks: dr.ignored,
+    exclusions: dr.exclusions.length,
+    designMinClearance: typeof dr.rules.min_clearance === "number" ? dr.rules.min_clearance : undefined,
+    polarity: { total: pol.length, verified: pol.filter((e) => e.verified).length, errors: pol.flatMap((e) => e.issues.filter((i) => i.level === "error").map((i) => ({ ref: e.ref, text: i.text }))) },
+    caps: getSettings().supplierCaps?.[profileId],
+  };
+}
+
 export async function runPreflight(p: KicadProject, profileId: string, fresh = false): Promise<Preflight> {
   const d = fresh || !p.design.drc ? await p.request("release", { checks: true }) : p.design;
-  return preflight(profileId, d.board, d.schematic, d.erc, d.drc);
+  return preflight(profileId, d.board, d.schematic, d.erc, d.drc, preflightExtras(p, profileId));
 }
 
 /** Fresh checks, then the package. Refuses an output folder inside a frozen project. */
-export async function runRelease(p: KicadProject, profileId: string, appVersion: string, outDir?: string): Promise<ReleaseResult> {
+export async function runRelease(p: KicadProject, profileId: string, appVersion: string, outDir?: string, opts: { review?: boolean; step?: boolean } = {}): Promise<ReleaseResult> {
   if (!PROFILES.some((x) => x.id === profileId)) throw new Error(`unknown profile ${profileId} (use ${PROFILES.map((x) => x.id).join(", ")})`);
   const dir = outDir ?? defaultReleaseDir(p, profileId);
   if ((p.info.frozen || !p.info.writable) && (dir + "/").startsWith(p.dir + "/")) throw new Error("the project is frozen: write the package outside its folder");
@@ -37,6 +52,7 @@ export async function runRelease(p: KicadProject, profileId: string, appVersion:
     profileId, board: d.board, schematic: d.schematic, erc: d.erc, drc: d.drc,
     projectDir: p.dir, shadowDir: p.shadowDir, pcb: p.info.pcb, sourceFiles: [...new Set(sources)],
     outDir: dir, appVersion, kicadVersion: kicad.version, timeoutMs: p.opts.timeoutSec * 1000,
+    extras: preflightExtras(p, profileId), review: opts.review, step: opts.step,
   });
 }
 

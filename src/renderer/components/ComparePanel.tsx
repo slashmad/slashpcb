@@ -7,6 +7,7 @@ import { useT } from "../i18n";
 interface Totals { size: [number, number]; copper: number; footprints: number; tracks: number; vias: number; trackLengthMm: number; zones: number }
 export interface RevisionDiff {
   other: string; label: string; ranAt: number;
+  rules?: { kind: string; what: string; from?: string; to?: string }[];
   board: null | {
     added: string[]; removed: { ref: string; x: number; y: number; bbox: [number, number, number, number] }[];
     moved: { ref: string; dx: number; dy: number; from: [number, number]; to: [number, number] }[];
@@ -71,6 +72,11 @@ export function ComparePanel({ diff, onDiff, onPickRef }: { diff: RevisionDiff |
                 {b.netsRemoved.map((n) => <div key={"r" + n} className="cmp-row small del">− {n}</div>)}
               </Section>
             </>
+          )}
+          {diff.rules && diff.rules.length > 0 && (
+            <Section title={t("cmp.rules")} n={diff.rules.length} open>
+              {diff.rules.map((c, i) => <div key={i} className={`cmp-row small ${/relaxed|ignored|exclusion\+|custom/.test(c.kind) ? "del" : ""}`}>{c.kind} {c.what}{c.from !== undefined || c.to !== undefined ? `: ${c.from ?? ""} → ${c.to ?? ""}` : ""}</div>)}
+            </Section>
           )}
           {s && (s.added.length + s.removed.length + s.value.length + s.footprint.length + s.fields.length > 0) && (
             <>

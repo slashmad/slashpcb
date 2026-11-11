@@ -21,6 +21,13 @@ export interface SupplierProfile {
   cplColumns: string[];
   cplLayer: { top: string; bottom: string };
   rotationField?: string[]; // per-footprint rotation offset fields (assembler-specific)
+  caps?: SupplierCaps; // documented manufacturing limits; user overrides in Settings › Release tab
+}
+
+/** Manufacturing limits for a supplier/process. Only values someone verified belong here. */
+export interface SupplierCaps {
+  minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number;
+  thicknesses?: number[]; tenting?: boolean; source?: string;
 }
 
 export const PROFILES: SupplierProfile[] = [
@@ -38,6 +45,29 @@ export const PROFILES: SupplierProfile[] = [
     bomColumns: ["Item #", "Designator", "Qty", "Manufacturer", "Mfg Part #", "Description / Value", "Package/Footprint", "Type"],
     cplColumns: ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"],
     cplLayer: { top: "Top", bottom: "Bottom" },
+  },
+  {
+    id: "aisler", name: "Aisler", needsPartNumber: "mpn",
+    note: "Gerber + Excellon zip with BOM and CPL in generic columns. Limits from Aisler's published 4-layer ENIG rules as recorded in a project review (Nov 2026): 0.125 mm minimum gap, no via tenting (via rings stay open). Confirm against Aisler's current rules.",
+    bomColumns: ["Designator", "Qty", "Value", "Footprint", "Manufacturer", "MPN"],
+    cplColumns: ["Designator", "Mid X", "Mid Y", "Rotation", "Layer"],
+    cplLayer: { top: "top", bottom: "bottom" },
+    caps: { minGap: 0.125, tenting: false, thicknesses: [0.8, 1.6], source: "Aisler 4-layer ENIG rules as recorded 2026-11; verify" },
+  },
+  {
+    id: "danishpcb", name: "DanishPCB", needsPartNumber: "mpn",
+    note: "Gerber + Excellon zip with BOM and CPL in generic columns. Limits as DanishPCB stated them for a prototype review (Oct 2026): drill ≥ 0.25 mm, annular ring ≥ 0.15 mm, copper gap ≥ 0.125 mm. Confirm for your order.",
+    bomColumns: ["Designator", "Qty", "Value", "Footprint", "Manufacturer", "MPN"],
+    cplColumns: ["Designator", "Mid X", "Mid Y", "Rotation", "Layer"],
+    cplLayer: { top: "top", bottom: "bottom" },
+    caps: { minDrill: 0.25, minRing: 0.15, minGap: 0.125, source: "DanishPCB statement for a prototype review, 2026-10; verify" },
+  },
+  {
+    id: "eurocircuits", name: "Eurocircuits", needsPartNumber: "mpn",
+    note: "Gerber + Excellon zip with BOM and CPL in generic columns. Enter the limits of the Eurocircuits pool/class you order in the Release tab.",
+    bomColumns: ["Designator", "Qty", "Value", "Footprint", "Manufacturer", "MPN"],
+    cplColumns: ["Designator", "Mid X", "Mid Y", "Rotation", "Layer"],
+    cplLayer: { top: "top", bottom: "bottom" },
   },
   {
     id: "generic", name: "Generic (KiCad native)", needsPartNumber: "mpn",
@@ -75,7 +105,46 @@ export function assembledParts(b: BoardModel): Footprint[] {
   return b.footprints.filter((f) => inBom(f) && inPos(f) && !isPcbFeature(f)).sort((x, y) => natural(x.ref, y.ref));
 }
 
-export function preflight(profileId: string, b: BoardModel | null, sch: SchematicModel | null, erc: CheckReport | null, drc: CheckReport | null): Preflight {
+export interface PreflightExtras {
+  rules?: CheckReport | null; // design invariants
+  ignoredChecks?: string[]; // DRC/ERC checks set to "ignore" in the project
+  exclusions?: number; // DRC exclusions in the project
+  designMinClearance?: number; // board-setup minimum clearance (what DRC enforces)
+  polarity?: { total: number; verified: number; errors: { ref: string; text: string }[] };
+  caps?: SupplierCaps; // user-provided override of the profile's limits
+}
+
+export interface BoardMinima { minTrack?: number; minDrill?: number; minViaDiameter?: number; minViaRing?: number; minPadRing?: number; vias: number; tentedVias: number; thickness?: number }
+
+/** Smallest manufactured features on the board (from the parsed geometry). */
+export function boardMinima(b: BoardModel): BoardMinima {
+  const m: BoardMinima = { vias: b.vias.length, tentedVias: 0, thickness: b.thickness };
+  const lo = (k: keyof BoardMinima, v: number) => { if (v > 0 && (m[k] === undefined || v < (m[k] as number))) (m as any)[k] = +v.toFixed(4); };
+  for (const t of b.tracks) lo("minTrack", t.w);
+  const def = b.stackup?.tentingDefault;
+  for (const v of b.vias) {
+    lo("minDrill", v.drill); lo("minViaDiameter", v.size); lo("minViaRing", (v.size - v.drill) / 2);
+    const front = v.tenting?.front && v.tenting.front !== "none" ? v.tenting.front : def?.front;
+    const back = v.tenting?.back && v.tenting.back !== "none" ? v.tenting.back : def?.back;
+    if (front === "yes" || back === "yes") m.tentedVias++;
+  }
+  for (const f of b.footprints) for (const p of f.pads) {
+    if (!p.drill || p.type !== "thru_hole") continue;
+    lo("minDrill", p.drill);
+    // Slots: compare each axis (long slot along the long pad side); round holes: the smaller pad side.
+    const dMin = p.drillMin ?? p.drill;
+    lo("minPadRing", Math.min(Math.min(p.w, p.h) - dMin, Math.max(p.w, p.h) - p.drill) / 2);
+  }
+  return m;
+}
+
+export function effectiveCaps(profileId: string, override?: SupplierCaps): SupplierCaps {
+  const base = PROFILES.find((p) => p.id === profileId)?.caps ?? {};
+  const o = Object.fromEntries(Object.entries(override ?? {}).filter(([, v]) => v !== undefined && v !== null && v !== ""));
+  return { ...base, ...o };
+}
+
+export function preflight(profileId: string, b: BoardModel | null, sch: SchematicModel | null, erc: CheckReport | null, drc: CheckReport | null, x: PreflightExtras = {}): Preflight {
   const profile = PROFILES.find((p) => p.id === profileId) ?? PROFILES[0];
   const gates: Gate[] = [];
   const add = (g: Gate) => gates.push(g);
@@ -130,6 +199,40 @@ export function preflight(profileId: string, b: BoardModel | null, sch: Schemati
   }
   const bottom = assembled.filter((f) => f.side === "B").length;
   add({ id: "bottom", title: "Bottom-side assembly", status: bottom ? "warn" : "pass", detail: bottom ? `${bottom} part(s) on the bottom: double-sided assembly; check rotations in the supplier's preview` : "single-sided" });
+  // Project rules that DRC cannot know.
+  if (x.rules) add({ id: "invariants", title: "Design invariants (slashpcb.rules.json)", status: x.rules.errors ? "fail" : x.rules.warnings ? "warn" : "pass",
+    detail: x.rules.violations.length ? x.rules.violations.slice(0, 3).map((v) => v.description).join("; ") : "all rules hold", refs: x.rules.violations.flatMap((v) => v.items.map((i) => i.ref).filter(Boolean) as string[]).slice(0, 60) });
+  else add({ id: "invariants", title: "Design invariants", status: "warn", detail: "No project rules yet (Checks › Rules). Pin/net, footprint, layer and lock rules turn known constraints into gates." });
+  if (x.polarity) {
+    const unverified = x.polarity.total - x.polarity.verified;
+    add({ id: "polarity", title: "Polarity and pin-1 review", status: x.polarity.errors.length ? "fail" : unverified ? "warn" : "pass",
+      detail: x.polarity.errors.length ? `${x.polarity.errors.length} contradiction(s): ${x.polarity.errors.slice(0, 3).map((e) => `${e.ref} ${e.text}`).join("; ")}` : `${x.polarity.verified} of ${x.polarity.total} polarized parts verified by you`,
+      refs: x.polarity.errors.map((e) => e.ref) });
+  }
+  if ((x.exclusions ?? 0) > 0 || (x.ignoredChecks ?? []).length) add({ id: "suppressed", title: "Suppressed checks", status: "warn",
+    detail: `${x.exclusions ?? 0} DRC exclusion(s); checks set to ignore: ${(x.ignoredChecks ?? []).join(", ") || "none"}. A suppressed check is not a pass.` });
+  // Supplier limits versus the board.
+  const caps = effectiveCaps(profile.id, x.caps);
+  const mins = boardMinima(b);
+  const capKeys = ["minTrack", "minGap", "minDrill", "minRing", "minViaDiameter"] as const;
+  if (!capKeys.some((k) => caps[k] !== undefined) && caps.tenting === undefined && !caps.thicknesses) {
+    add({ id: "limits", title: "Supplier limits", status: "warn", detail: `No manufacturing limits known for ${profile.name}; enter them in the Release tab. Board minima: track ${mins.minTrack ?? "–"}, drill ${mins.minDrill ?? "–"}, via ring ${mins.minViaRing ?? "–"} mm.` });
+  } else {
+    const bad: string[] = [];
+    const chk = (label: string, have: number | undefined, need: number | undefined) => { if (need !== undefined && have !== undefined && have + 1e-6 < need) bad.push(`${label} ${have} < ${need}`); };
+    chk("track", mins.minTrack, caps.minTrack); chk("drill", mins.minDrill, caps.minDrill); chk("via ring", mins.minViaRing, caps.minRing);
+    chk("pad ring", mins.minPadRing, caps.minRing); chk("via diameter", mins.minViaDiameter, caps.minViaDiameter);
+    if (caps.minGap !== undefined && x.designMinClearance !== undefined && x.designMinClearance + 1e-6 < caps.minGap) bad.push(`board rule min_clearance ${x.designMinClearance} < supplier gap ${caps.minGap} (DRC does not enforce the supplier's gap)`);
+    add({ id: "limits", title: `Supplier limits (${profile.name})`, status: bad.length ? "fail" : "pass",
+      detail: bad.length ? bad.join("; ") : `track ${mins.minTrack ?? "–"}, drill ${mins.minDrill ?? "–"}, via ring ${mins.minViaRing ?? "–"}, pad ring ${mins.minPadRing ?? "–"} mm within limits${caps.source ? ` (${caps.source})` : ""}` });
+  }
+  if (caps.thicknesses?.length && mins.thickness) {
+    const near = caps.thicknesses.reduce((a, c) => (Math.abs(c - mins.thickness!) < Math.abs(a - mins.thickness!) ? c : a));
+    add({ id: "thickness", title: "Board thickness", status: Math.abs(near - mins.thickness) > 0.1 ? "warn" : "pass",
+      detail: `design ${mins.thickness} mm → order ${near} mm. Make sure the quote uses this thickness (offers have come back for 1.6 mm on 0.8 mm designs).` });
+  } else if (mins.thickness) add({ id: "thickness", title: "Board thickness", status: "pass", detail: `design ${mins.thickness} mm: state it explicitly in the order.` });
+  if (caps.tenting === false && mins.tentedVias > 0) add({ id: "tenting", title: "Via tenting", status: "warn",
+    detail: `${mins.tentedVias} via(s) are tented in the design, but ${profile.name} does not tent: rings will be exposed. Check vias next to paste openings and contacts.` });
   add({ id: "physical", title: "Physical verification", status: "warn", detail: "Checks are rule-based. They do not prove function, RF/EMC, thermal behaviour or mechanical fit." });
   const ok = !gates.some((g) => g.status === "fail");
   return { profile: profile.id, ok, gates, assembled: assembled.length, ranAt: Date.now() };
@@ -174,10 +277,11 @@ export interface ReleaseResult { dir: string; files: string[]; preflight: Prefli
 export async function exportRelease(o: {
   profileId: string; board: BoardModel; schematic: SchematicModel | null; erc: CheckReport | null; drc: CheckReport | null;
   projectDir: string; shadowDir: string; pcb: string; sourceFiles: string[]; outDir: string; appVersion: string; kicadVersion: string | null; timeoutMs: number;
+  extras?: PreflightExtras; review?: boolean; step?: boolean;
 }): Promise<ReleaseResult> {
   const t0 = Date.now();
   const profile = PROFILES.find((p) => p.id === o.profileId) ?? PROFILES[0];
-  const pf = preflight(profile.id, o.board, o.schematic, o.erc, o.drc);
+  const pf = preflight(profile.id, o.board, o.schematic, o.erc, o.drc, o.extras);
   mkdirSync(o.outDir, { recursive: true });
   if (readdirSync(o.outDir).length) throw new Error(`the output folder is not empty: ${o.outDir}`);
   const stem = basename(o.pcb).replace(/\.kicad_pcb$/i, "");
@@ -252,11 +356,44 @@ export async function exportRelease(o: {
   const missingInCpl = bomRefs.filter((r) => !cplRefs.includes(r));
   pf.gates.push({ id: "bom-cpl", title: "BOM ↔ CPL ↔ board", status: missingInCpl.length ? "fail" : "pass",
     detail: missingInCpl.length ? `${missingInCpl.length} BOM part(s) missing in the CPL` : `${bomRefs.length} placed parts, ${groups.size} BOM lines, CPL complete`, refs: missingInCpl });
+  // Read the exports back: the files must describe this board, not just exist.
+  pf.gates.push(readBack(gerberDir, b, stem));
   pf.ok = !pf.gates.some((g) => g.status === "fail");
+
+  // Review material for the supplier and for you: assembly drawings, every layer, PCBA STEP, build spec.
+  const extra: string[] = [];
+  if (o.review !== false) {
+    const rev = join(o.outDir, "review");
+    mkdirSync(rev, { recursive: true });
+    const soft = async (what: string, args: string[], out: string) => {
+      const r = await runCli(args, o.shadowDir, o.timeoutMs).catch((e) => ({ code: -1, stderr: String(e), stdout: "" }));
+      if (r.code === 0 && existsSync(out)) extra.push(out); else pf.gates.push({ id: `review-${what}`, title: `Review material: ${what}`, status: "warn", detail: `not generated: ${(r.stderr || r.stdout).trim().slice(-200)}` });
+    };
+    const top = join(rev, `${stem}-assembly-top.pdf`), bottom = join(rev, `${stem}-assembly-bottom.pdf`);
+    await soft("assembly top", ["pcb", "export", "pdf", "--mode-single", "--layers", "F.Fab,F.Silkscreen,Edge.Cuts", "--sp", "--include-border-title", "-o", top, o.pcb], top);
+    await soft("assembly bottom", ["pcb", "export", "pdf", "--mode-single", "--mirror", "--layers", "B.Fab,B.Silkscreen,Edge.Cuts", "--sp", "--include-border-title", "-o", bottom, o.pcb], bottom);
+    const layerDir = join(rev, "layers");
+    mkdirSync(layerDir, { recursive: true });
+    const used = [...b.copper, "F.Silkscreen", "B.Silkscreen", "F.Mask", "B.Mask", "F.Paste", "B.Paste", "F.Fab", "B.Fab", "Edge.Cuts"];
+    const r = await runCli(["pcb", "export", "svg", "--mode-multi", "--page-size-mode", "2", "--layers", used.join(","), "--cl", "Edge.Cuts", "--drill-shape-opt", "2", "-o", layerDir + "/", o.pcb], o.shadowDir, o.timeoutMs).catch(() => null);
+    const svgs = existsSync(layerDir) ? readdirSync(layerDir).filter((f) => f.endsWith(".svg")).sort() : [];
+    if (r && svgs.length) {
+      const index = join(layerDir, "index.html");
+      writeFileSync(index, `<!doctype html><meta charset="utf-8"><title>${stem} layers</title><style>body{font:14px sans-serif;background:#222;color:#eee;margin:16px}figure{display:inline-block;margin:8px;background:#fff;padding:6px}figcaption{color:#222;font-weight:600}img{max-width:46vw;max-height:60vh}</style><h1>${stem} — all layers</h1>${svgs.map((f) => `<figure><img src="${f}"><figcaption>${f.replace(/\.svg$/, "")}</figcaption></figure>`).join("")}\n`);
+      extra.push(...svgs.map((f) => join(layerDir, f)), index);
+    }
+    if (o.step !== false) {
+      const step = join(rev, `${stem}-PCBA.step`);
+      await soft("PCBA STEP", ["pcb", "export", "step", "--force", "--subst-models", "--no-dnp", "-o", step, o.pcb], step);
+    }
+  }
+  const spec = join(o.outDir, "BUILD_SPEC.md");
+  writeFileSync(spec, buildSpec(b, stem, profile, o.extras, parts));
+  extra.push(spec);
 
   // Manifest + readme.
   const git = await new Promise<string | null>((res) => execFile("git", ["-C", o.projectDir, "rev-parse", "--short", "HEAD"], { env: kicadEnv(), timeout: 5000 }, (e, out) => res(e ? null : out.trim())));
-  const outputs = [...gerbers.map((g) => join(gerberDir, g)), zipFile, bomFile, cplFile, posFile];
+  const outputs = [...gerbers.map((g) => join(gerberDir, g)), zipFile, bomFile, cplFile, posFile, ...extra];
   const manifest = {
     format: "slashpcb-release/1", createdAt: new Date().toISOString(), app: `SlashPCB ${o.appVersion}`, kicad: o.kicadVersion,
     profile: { id: profile.id, name: profile.name }, board: { file: basename(o.pcb), title: b.title, rev: b.rev, sizeMm: [+(b.bbox[2] - b.bbox[0]).toFixed(3), +(b.bbox[3] - b.bbox[1]).toFixed(3)], copperLayers: b.copper.length, thicknessMm: b.thickness },
@@ -279,6 +416,9 @@ export async function exportRelease(o: {
     `  ${basename(bomFile)}`,
     `  ${basename(cplFile)}`,
     "",
+    "For the supplier and for review: BUILD_SPEC.md (stack, finish, limits, assembly notes), review/ (assembly drawings top and bottom, every layer with index.html, PCBA STEP).",
+    "Coordinates: CPL in KiCad's absolute millimetres, X right and Y up, bottom-side X not mirrored; rotations are KiCad's (plus the profile's offsets).",
+    "",
     "Preflight:",
     ...pf.gates.map((g) => `  [${g.status.toUpperCase()}] ${g.title}: ${g.detail}`),
     "",
@@ -288,4 +428,92 @@ export async function exportRelease(o: {
   ].join("\n");
   writeFileSync(join(o.outDir, "README.txt"), readme);
   return { dir: o.outDir, files: [...outputs, manifestFile, join(o.outDir, "README.txt")], preflight: pf, manifest: manifestFile, seconds: (Date.now() - t0) / 1000 };
+}
+
+/** Read the generated Gerber job file and Excellon drills back and compare them with the board. */
+export function readBack(gerberDir: string, b: BoardModel, stem: string): Gate {
+  const problems: string[] = [];
+  const notes: string[] = [];
+  const files = existsSync(gerberDir) ? readdirSync(gerberDir) : [];
+  const job = files.find((f) => f.endsWith(".gbrjob"));
+  if (!job) problems.push("no Gerber job file");
+  else {
+    try {
+      const j = JSON.parse(readFileSync(join(gerberDir, job), "utf8"));
+      const fns: string[] = (j.FilesAttributes ?? []).map((f: any) => String(f.FileFunction ?? ""));
+      const layers = Number(j.GeneralSpecs?.LayerNumber ?? 0);
+      if (layers !== b.copper.length) problems.push(`job says ${layers} copper layers, board has ${b.copper.length}`);
+      for (let i = 1; i <= b.copper.length; i++) if (!fns.some((f) => f.startsWith(`Copper,L${i},`))) problems.push(`copper L${i} missing`);
+      for (const need of ["SolderMask,Top", "SolderMask,Bot", "Legend,Top", "Legend,Bot", "Profile"]) if (!fns.some((f) => f.startsWith(need))) problems.push(`${need} missing`);
+      const size = j.GeneralSpecs?.Size;
+      if (size && (Math.abs(size.X - (b.bbox[2] - b.bbox[0])) > 0.2 || Math.abs(size.Y - (b.bbox[3] - b.bbox[1])) > 0.2)) problems.push(`job size ${size.X}×${size.Y} differs from the board`);
+      if (j.GeneralSpecs?.BoardThickness) notes.push(`job thickness ${j.GeneralSpecs.BoardThickness} mm`);
+      notes.push(`${fns.length} Gerber files in the job`);
+    } catch (e: any) { problems.push(`Gerber job unreadable: ${e?.message ?? e}`); }
+  }
+  // Excellon hits: one coordinate line per hole (slots: one G85 line).
+  const hits = (name: string) => {
+    const f = files.find((x) => x.endsWith(name));
+    if (!f) return null;
+    return readFileSync(join(gerberDir, f), "utf8").split(/\r?\n/).filter((l) => /^X-?[\d.]+Y-?[\d.]+/.test(l) || /^Y-?[\d.]+/.test(l)).length;
+  };
+  const pth = hits("-PTH.drl"), npth = hits("-NPTH.drl");
+  const throughVias = b.vias.filter((v) => !v.type || v.type === "through").length;
+  let expPth = throughVias, expNpth = 0;
+  for (const f of b.footprints) for (const p of f.pads) {
+    if (!p.drill) continue;
+    if (p.type === "np_thru_hole") expNpth++; else if (p.type === "thru_hole") expPth++;
+  }
+  if (pth === null && expPth) problems.push("no plated drill file");
+  else if (pth !== null && pth !== expPth) problems.push(`plated drill hits ${pth}, board has ${expPth} (vias ${throughVias} + plated pad holes)`);
+  if (npth === null && expNpth) problems.push("no non-plated drill file");
+  else if (npth !== null && npth !== expNpth) problems.push(`non-plated drill hits ${npth}, board has ${expNpth}`);
+  if (pth !== null) notes.push(`${pth} plated and ${npth ?? 0} non-plated holes match the board`);
+  void stem;
+  return { id: "readback", title: "Exports read back", status: problems.length ? "fail" : "pass", detail: problems.length ? problems.join("; ") : notes.join("; ") };
+}
+
+/** A build specification the supplier can read next to the Gerbers. */
+export function buildSpec(b: BoardModel, stem: string, profile: SupplierProfile, x: PreflightExtras | undefined, parts: Footprint[]): string {
+  const su = b.stackup;
+  const mins = boardMinima(b);
+  const caps = effectiveCaps(profile.id, x?.caps);
+  const cu = su?.layers.filter((l) => l.type === "copper") ?? [];
+  const noPaste = b.footprints.filter((f) => isPcbFeature(f) && f.pads.length && f.ref && !f.ref.startsWith("#")).sort((a, c) => natural(a.ref, c.ref));
+  const bottom = parts.filter((f) => f.side === "B").length;
+  const fine = parts.filter((f) => f.pads.length >= 8 && f.pads.some((p) => Math.min(p.w, p.h) <= 0.3)).map((f) => f.ref);
+  const dnp = b.footprints.filter((f) => f.attrs.includes("dnp")).map((f) => f.ref);
+  const consigned = parts.filter((f) => /consign|customer|kund/i.test(Object.entries(f.fields).map(([k, v]) => `${k}=${v}`).join(" "))).map((f) => f.ref);
+  const L: (string | null)[] = [
+    `# ${stem} — fabrication and assembly specification`,
+    "",
+    `Generated by SlashPCB for ${profile.name} from the KiCad board. Review it against the order form; the supplier's CAM/DFM report is authoritative. No order, payment or supplier acceptance is implied.`,
+    "",
+    "## Fabrication",
+    "",
+    `- Board: ${(b.bbox[2] - b.bbox[0]).toFixed(2)} × ${(b.bbox[3] - b.bbox[1]).toFixed(2)} mm, ${b.copper.length} copper layers (${b.copper.join(" / ")}). Design thickness ${b.thickness ?? "?"} mm: order this thickness, do not substitute.`,
+    su?.finish ? `- Surface finish: ${su.finish}.` : "- Surface finish: not set in the board stackup (set it in KiCad › Board Setup › Physical Stackup).",
+    `- Solder mask: top ${su?.maskColorTop ?? "?"}, bottom ${su?.maskColorBottom ?? "?"}. Silkscreen: top ${su?.silkColorTop ?? "?"}, bottom ${su?.silkColorBottom ?? "?"}.`,
+    cu.length ? `- Copper: ${cu.map((l) => `${l.name} ${l.thickness ? `${(l.thickness * 1000).toFixed(1)} µm` : "?"}`).join(", ")}.` : null,
+    su?.layers.some((l) => l.type !== "copper" && l.thickness) ? `- Dielectrics: ${su!.layers.filter((l) => /prepreg|core/i.test(l.type)).map((l) => `${l.name} ${l.thickness} mm ${l.material ?? ""}`.trim()).join("; ")}. Confirm the supplier's actual stack and any impedance targets.` : null,
+    `- Smallest features: track ${mins.minTrack ?? "–"} mm, drill ${mins.minDrill ?? "–"} mm, via ${mins.minViaDiameter ?? "–"} mm with ring ${mins.minViaRing ?? "–"} mm, plated pad ring ${mins.minPadRing ?? "–"} mm. Board rule minimum clearance ${x?.designMinClearance ?? "?"} mm.`,
+    `- Vias: ${mins.vias}, of which ${mins.tentedVias} tented in the design.${caps.tenting === false ? ` ${profile.name} does not tent vias: rings will be exposed.` : ""}`,
+    caps.source ? `- Supplier limits used for the checks: ${[caps.minTrack && `track ${caps.minTrack}`, caps.minGap && `gap ${caps.minGap}`, caps.minDrill && `drill ${caps.minDrill}`, caps.minRing && `ring ${caps.minRing}`].filter(Boolean).join(", ")} mm (${caps.source}).` : null,
+    noPaste.length ? `- ${noPaste.length} board-only pad groups have no paste and must stay as supplied (contacts, test pads, jumpers, edge fingers): ${noPaste.slice(0, 40).map((f) => f.ref).join(", ")}${noPaste.length > 40 ? " …" : ""}. Do not cover them with labels or markings.` : null,
+    "- The Gerbers describe one unpanelized board. Please propose rails, fiducials and depanelization outside the outline.",
+    "",
+    "## Assembly",
+    "",
+    `- ${parts.length} placed parts (${parts.length - bottom} top, ${bottom} bottom)${bottom ? ": double-sided assembly" : ""}. Use the exact MPNs in the BOM; propose substitutes explicitly, never silently.`,
+    "- CPL: KiCad absolute millimetres, X right, Y up, bottom-side X not mirrored, KiCad rotations. Check pin 1 / cathode of every polarized part in your placement preview against the assembly drawings in review/.",
+    fine.length ? `- Fine-pitch parts (pads ≤ 0.3 mm): ${fine.join(", ")}. Qualify stencil, paste inspection and X-ray where joints are hidden.` : null,
+    dnp.length ? `- Do not place: ${dnp.join(", ")}.` : null,
+    consigned.length ? `- Customer-supplied (consigned) parts: ${consigned.join(", ")}.` : null,
+    "",
+    "## Not covered",
+    "",
+    "Function, RF/EMC, thermal behaviour and mechanical fit are not verified by these files. First articles need inspection and bench testing before any larger build.",
+    "",
+  ];
+  return (L.filter((l) => l !== null) as string[]).join("\n");
 }

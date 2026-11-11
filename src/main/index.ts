@@ -17,6 +17,7 @@ import { McpHub } from "./mcpHub";
 import { KicadProject, resolveProject } from "./project";
 import { getSettings, rememberProject, setSettings } from "./settings";
 import { compareWithFolder, compareWithGit } from "./kicad/compare";
+import { describeRule } from "./kicad/invariants";
 import { PROFILES } from "./kicad/release";
 import { defaultReleaseDir, listPackages, runPreflight, runRelease } from "./releases";
 import { registerTools } from "./tools";
@@ -265,17 +266,29 @@ function registerIpc(): void {
     if (r.canceled || !r.filePaths[0]) return null;
     const res = resolveProject(r.filePaths[0]);
     if (!res) return { ok: false, error: "No KiCad project there." };
-    try { return { ok: true, diff: compareWithFolder(res.dir, res.pro.replace(/\.kicad_pro$/i, ""), project.design) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+    try { return { ok: true, diff: compareWithFolder(res.dir, res.pro.replace(/\.kicad_pro$/i, ""), project.design, project.designRules()) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
   });
   ipcMain.handle("compare:git", async (_e, rev?: string) => {
     if (!project?.info.pcb) return null;
-    try { return { ok: true, diff: await compareWithGit(project.dir, project.info.pcb, project.design, rev || "HEAD") }; } catch (e: any) { return { ok: false, error: `Not a Git repository or no such revision (${(e?.message ?? String(e)).split("\n")[0]})` }; }
+    try { return { ok: true, diff: await compareWithGit(project.dir, project.info.pcb, project.design, rev || "HEAD", project.designRules()) }; } catch (e: any) { return { ok: false, error: `Not a Git repository or no such revision (${(e?.message ?? String(e)).split("\n")[0]})` }; }
   });
 
-  ipcMain.handle("release:profiles", () => PROFILES.map((p) => ({ id: p.id, name: p.name, note: p.note })));
+  ipcMain.handle("release:profiles", () => PROFILES.map((p) => ({ id: p.id, name: p.name, note: p.note, caps: p.caps ?? {} })));
+  ipcMain.handle("rules:list", () => {
+    if (!project) return null;
+    const { file, data } = project.rulesData();
+    return { file, writePath: project.rulesWritePath(), rules: data.rules.map((r) => ({ ...r, text: describeRule(r) })), report: project.design.rules };
+  });
+  ipcMain.handle("rules:add", (_e, r) => {
+    if (!project) return null;
+    try { const rule = project.addRule(r); project.refreshRules(); return { ok: true, rule }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+  });
+  ipcMain.handle("rules:remove", (_e, id: string) => { if (!project) return false; const ok = project.removeRule(id); project.refreshRules(); return ok; });
+  ipcMain.handle("polarity:list", () => project?.polarity() ?? []);
+  ipcMain.handle("polarity:verify", (_e, ref: string, fingerprint: string | null) => project?.setPolarityVerified(ref, fingerprint) ?? []);
   ipcMain.handle("release:preflight", (_e, profile: string, fresh?: boolean) => (project ? runPreflight(project, profile, !!fresh) : null));
   ipcMain.handle("release:list", () => (project ? listPackages(project) : []));
-  ipcMain.handle("release:export", async (_e, profile: string, choose?: boolean) => {
+  ipcMain.handle("release:export", async (_e, profile: string, choose?: boolean, opts?: { step?: boolean }) => {
     if (!project) return null;
     let out: string | undefined;
     if (choose) {
@@ -283,7 +296,7 @@ function registerIpc(): void {
       if (r.canceled || !r.filePaths[0]) return null;
       out = r.filePaths[0];
     }
-    try { return { ok: true, result: await runRelease(project, profile, app.getVersion(), out) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
+    try { return { ok: true, result: await runRelease(project, profile, app.getVersion(), out, { step: opts?.step }) }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
   });
   ipcMain.handle("release:reveal", (_e, dir: string) => shell.openPath(dir));
 

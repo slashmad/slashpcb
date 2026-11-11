@@ -61,6 +61,7 @@ export interface Pad {
   layers: string[]; // expanded copper/tech layers
   net: string;
   drill?: number; // round drill diameter or the larger slot size
+  drillMin?: number; // smaller slot size (= drill for round holes)
   polys?: number[][]; // absolute outlines (all shapes except circle; custom pads may have several)
   r?: number; // circle radius
   pinFunction?: string;
@@ -82,7 +83,10 @@ export interface Footprint {
 }
 
 export interface Track { x1: number; y1: number; x2: number; y2: number; w: number; layer: string; net: string; pts?: number[] }
-export interface Via { x: number; y: number; size: number; drill: number; layers: [string, string]; net: string; type?: string }
+export interface Via { x: number; y: number; size: number; drill: number; layers: [string, string]; net: string; type?: string; tenting?: { front: string; back: string } }
+
+export interface StackupLayer { name: string; type: string; thickness?: number; material?: string; color?: string; epsilonR?: number }
+export interface Stackup { layers: StackupLayer[]; finish?: string; maskColorTop?: string; maskColorBottom?: string; silkColorTop?: string; silkColorBottom?: string; tentingDefault?: { front: string; back: string } }
 export interface Zone {
   net: string;
   name?: string;
@@ -103,6 +107,7 @@ export interface BoardModel {
   rev?: string;
   date?: string;
   thickness?: number;
+  stackup?: Stackup;
   layers: LayerInfo[];
   copper: string[]; // copper layer names top to bottom
   bbox: [number, number, number, number];
@@ -166,7 +171,7 @@ export interface SchematicModel {
 
 export interface CheckItem { description: string; x?: number; y?: number; uuid?: string; ref?: string; sheet?: string }
 export interface CheckViolation {
-  source: "erc" | "drc" | "unconnected" | "parity";
+  source: "erc" | "drc" | "unconnected" | "parity" | "rules";
   type: string;
   severity: "error" | "warning" | "exclusion" | string;
   description: string;
@@ -174,7 +179,7 @@ export interface CheckViolation {
   sheet?: string;
 }
 export interface CheckReport {
-  kind: "erc" | "drc";
+  kind: "erc" | "drc" | "rules";
   ok: boolean; // ran without tool failure
   ranAt: number;
   seconds: number;
@@ -202,6 +207,8 @@ export interface DesignSnapshot {
   schematic: SchematicModel | null;
   erc: CheckReport | null;
   drc: CheckReport | null;
+  rules: CheckReport | null; // design invariants (slashpcb.rules.json)
+  rulesFile: string | null;
   glb: string | null; // absolute path of the 3D model export
   errors: string[]; // parse/export failures
 }
@@ -293,6 +300,8 @@ export interface Settings {
   liveLink: boolean; // connect to a running KiCad through its IPC API (kicad-python)
   syncSelection: boolean; // mirror selection between KiCad's PCB editor and SlashPCB
   bridgePython?: string; // Python with kicad-python (default: repo .venv or <userData>/bridge-venv)
+  supplierCaps?: Record<string, { minTrack?: number; minGap?: number; minDrill?: number; minRing?: number; minViaDiameter?: number; thicknesses?: number[]; tenting?: boolean; source?: string }>;
+  releaseStep?: boolean; // include a PCBA STEP in release packages
 }
 
 export interface LiveStatus { enabled: boolean; running: boolean; connected: boolean; version?: string | null; boards?: string[]; error?: string; python?: string | null; matches?: boolean }

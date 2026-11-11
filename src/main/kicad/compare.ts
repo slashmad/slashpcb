@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { BoardModel, Footprint, SchematicModel } from "../../shared/types";
 import { kicadEnv } from "./cli";
+import { diffDesignRules, loadDesignRules, readDesignRules, rulesText, type DesignRules, type RuleChange } from "./designrules";
 import { parseBoard } from "./pcb";
 import { parseSchematic } from "./sch";
 
@@ -26,7 +27,7 @@ export interface BoardDiff {
   after: BoardDiff["before"];
 }
 export interface SchDiff { added: string[]; removed: string[]; value: Change[]; footprint: Change[]; fields: (Change & { field: string })[]; sheets: [number, number] }
-export interface RevisionDiff { other: string; label: string; board: BoardDiff | null; schematic: SchDiff | null; ranAt: number }
+export interface RevisionDiff { other: string; label: string; board: BoardDiff | null; schematic: SchDiff | null; rules?: RuleChange[]; ranAt: number }
 
 const natural = (a: string, b: string) => a.localeCompare(b, undefined, { numeric: true });
 const IGNORE_FIELDS = new Set(["Reference", "Value", "Footprint", "Datasheet", "Description", "ki_fp_filters", "ki_keywords", "ki_description"]);
@@ -88,7 +89,7 @@ export function diffSchematics(old: SchematicModel, cur: SchematicModel): SchDif
 }
 
 /** Compare with another KiCad project file/folder (resolved by the caller to dir + stem). */
-export function compareWithFolder(otherDir: string, otherStem: string, cur: { board: BoardModel | null; schematic: SchematicModel | null }): RevisionDiff {
+export function compareWithFolder(otherDir: string, otherStem: string, cur: { board: BoardModel | null; schematic: SchematicModel | null }, curRules?: DesignRules): RevisionDiff {
   const pcb = join(otherDir, `${otherStem}.kicad_pcb`), sch = join(otherDir, `${otherStem}.kicad_sch`);
   const ob = existsSync(pcb) ? parseBoard(pcb) : null;
   const os = existsSync(sch) ? parseSchematic(sch, otherDir) : null;
@@ -96,6 +97,7 @@ export function compareWithFolder(otherDir: string, otherStem: string, cur: { bo
     other: join(otherDir, otherStem), label: otherStem, ranAt: Date.now(),
     board: ob && cur.board ? diffBoards(ob, cur.board) : null,
     schematic: os && cur.schematic ? diffSchematics(os, cur.schematic) : null,
+    rules: curRules ? diffDesignRules(loadDesignRules(join(otherDir, `${otherStem}.kicad_pro`), join(otherDir, `${otherStem}.kicad_dru`)), curRules) : undefined,
   };
 }
 
@@ -103,13 +105,18 @@ const git = (dir: string, args: string[]) => new Promise<string>((res, rej) =>
   execFile("git", ["-C", dir, ...args], { env: kicadEnv(), maxBuffer: 200 * 1024 * 1024, timeout: 30000 }, (e, out) => (e ? rej(e) : res(out))));
 
 /** Compare the board with its version in a Git revision (default HEAD) of the project's repository. */
-export async function compareWithGit(projectDir: string, pcbRel: string, cur: { board: BoardModel | null }, rev = "HEAD"): Promise<RevisionDiff> {
+export async function compareWithGit(projectDir: string, pcbRel: string, cur: { board: BoardModel | null }, rev = "HEAD", curRules?: DesignRules): Promise<RevisionDiff> {
   const top = (await git(projectDir, ["rev-parse", "--show-toplevel"])).trim();
   const path = relative(top, join(projectDir, pcbRel)).split("\\").join("/");
   const text = await git(top, ["show", `${rev}:${path}`]);
   const short = (await git(top, ["rev-parse", "--short", rev])).trim();
   const ob = parseBoard(`${rev}:${path}`, text);
-  return { other: `${rev}:${path}`, label: `git ${short}`, ranAt: Date.now(), board: cur.board ? diffBoards(ob, cur.board) : null, schematic: null };
+  let rules: RuleChange[] | undefined;
+  if (curRules) {
+    const show = (ext: string) => git(top, ["show", `${rev}:${path.replace(/\.kicad_pcb$/i, ext)}`]).catch(() => null);
+    rules = diffDesignRules(readDesignRules(await show(".kicad_pro"), await show(".kicad_dru")), curRules);
+  }
+  return { other: `${rev}:${path}`, label: `git ${short}`, ranAt: Date.now(), board: cur.board ? diffBoards(ob, cur.board) : null, schematic: null, rules };
 }
 
 export function diffText(d: RevisionDiff, max = 40): string {
@@ -139,5 +146,6 @@ export function diffText(d: RevisionDiff, max = 40): string {
     list("Symbol footprints", s.footprint, (c) => `${c.ref} ${c.from}→${c.to}`);
     list("Symbol fields", s.fields, (c) => `${c.ref}.${c.field} "${c.from}"→"${c.to}"`);
   }
+  if (d.rules) L.push(rulesText(d.rules));
   return L.join("\n");
 }

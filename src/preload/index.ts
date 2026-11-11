@@ -36,6 +36,15 @@ const api = {
     onUpdate: on("design:update"),
     onState: on("design:state"),
   },
+  rules: {
+    list: () => ipcRenderer.invoke("rules:list"),
+    add: (r: unknown) => ipcRenderer.invoke("rules:add", r),
+    remove: (id: string) => ipcRenderer.invoke("rules:remove", id),
+  },
+  polarity: {
+    list: () => ipcRenderer.invoke("polarity:list"),
+    verify: (ref: string, fingerprint: string | null) => ipcRenderer.invoke("polarity:verify", ref, fingerprint),
+  },
   compare: {
     folder: () => ipcRenderer.invoke("compare:folder"),
     git: (rev?: string) => ipcRenderer.invoke("compare:git", rev),
@@ -45,7 +54,7 @@ const api = {
     profiles: () => ipcRenderer.invoke("release:profiles"),
     preflight: (profile: string, fresh?: boolean) => ipcRenderer.invoke("release:preflight", profile, fresh),
     list: () => ipcRenderer.invoke("release:list"),
-    export: (profile: string, choose?: boolean) => ipcRenderer.invoke("release:export", profile, choose),
+    export: (profile: string, choose?: boolean, opts?: { step?: boolean }) => ipcRenderer.invoke("release:export", profile, choose, opts),
     reveal: (dir: string) => ipcRenderer.invoke("release:reveal", dir),
   },
   live: {

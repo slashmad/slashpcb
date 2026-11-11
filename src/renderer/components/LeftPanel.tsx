@@ -4,6 +4,7 @@ import { api, fmtTime } from "../api";
 import { useT } from "../i18n";
 import { ComparePanel, type RevisionDiff } from "./ComparePanel";
 import { ReleasePanel } from "./ReleasePanel";
+import { PolarityPanel, RulesPanel } from "./ReviewPanels";
 
 export type LeftTab = "files" | "parts" | "nets" | "checks" | "release" | "diffs";
 
@@ -163,10 +164,37 @@ function Diffs({ diffs, onOpen }: { diffs: FileDiff[]; onOpen(p: string): void }
   );
 }
 
+function ChecksTab(p: Props) {
+  const t = useT();
+  const d = p.design;
+  const [sub, setSub] = useState<"checks" | "rules" | "polarity">(() => { try { return (localStorage.getItem("checks-sub") as any) || "checks"; } catch { return "checks"; } });
+  const pick = (k: typeof sub) => { setSub(k); try { localStorage.setItem("checks-sub", k); } catch { /* none */ } };
+  const ruleErr = d.rules?.errors ?? 0;
+  return (
+    <div className="checks-tab">
+      <div className="seg sub-seg">
+        <button className={sub === "checks" ? "on" : ""} onClick={() => pick("checks")}>ERC/DRC</button>
+        <button className={sub === "rules" ? "on" : ""} onClick={() => pick("rules")}>{t("checks.rules")}{ruleErr ? <span className="count bad">{ruleErr}</span> : null}</button>
+        <button className={sub === "polarity" ? "on" : ""} onClick={() => pick("polarity")}>{t("checks.polarity")}</button>
+      </div>
+      {sub === "checks" && (
+        <div className="checks">
+          <div className="checks-actions"><button onClick={p.onRunChecks}>{t("checks.run")}</button></div>
+          <Report r={d.erc} kind="erc" active={p.activeMarker?.kind === "erc" ? p.activeMarker.i : null} onPick={(i, v) => p.onPickMarker("erc", i, v)} />
+          <Report r={d.drc} kind="drc" active={p.activeMarker?.kind === "drc" ? p.activeMarker.i : null} onPick={(i, v) => p.onPickMarker("drc", i, v)} />
+          {d.errors.length > 0 && <div className="err-msg">{d.errors.join("\n")}</div>}
+        </div>
+      )}
+      {sub === "rules" && <RulesPanel version={d.n * 1000 + (d.rules?.violations.length ?? 0)} selectedRef={p.selectedRef} onPickRef={p.onPickRef} />}
+      {sub === "polarity" && <PolarityPanel version={d.n} selectedRef={p.selectedRef} onPickRef={p.onPickRef} />}
+    </div>
+  );
+}
+
 export function LeftPanel(p: Props) {
   const t = useT();
   const d = p.design;
-  const errs = (d.erc?.errors ?? 0) + (d.drc?.errors ?? 0);
+  const errs = (d.erc?.errors ?? 0) + (d.drc?.errors ?? 0) + (d.rules?.errors ?? 0);
   const warns = (d.erc?.warnings ?? 0) + (d.drc?.warnings ?? 0);
   const tab = (k: LeftTab, label: string, badge?: React.ReactNode) => (
     <button className={p.tab === k ? "on" : ""} onClick={() => p.onTab(k)}>{label}{badge}</button>
@@ -185,14 +213,7 @@ export function LeftPanel(p: Props) {
         {p.tab === "files" && <FileTree node={p.tree} onOpen={p.onOpenFile} />}
         {p.tab === "parts" && <Parts design={d} selectedRef={p.selectedRef} onPick={p.onPickRef} />}
         {p.tab === "nets" && <Nets design={d} selectedNet={p.selectedNet} onPick={p.onPickNet} />}
-        {p.tab === "checks" && (
-          <div className="checks">
-            <div className="checks-actions"><button onClick={p.onRunChecks}>{t("checks.run")}</button></div>
-            <Report r={d.erc} kind="erc" active={p.activeMarker?.kind === "erc" ? p.activeMarker.i : null} onPick={(i, v) => p.onPickMarker("erc", i, v)} />
-            <Report r={d.drc} kind="drc" active={p.activeMarker?.kind === "drc" ? p.activeMarker.i : null} onPick={(i, v) => p.onPickMarker("drc", i, v)} />
-            {d.errors.length > 0 && <div className="err-msg">{d.errors.join("\n")}</div>}
-          </div>
-        )}
+        {p.tab === "checks" && <ChecksTab {...p} />}
         {p.tab === "release" && <ReleasePanel onPickRef={p.onPickRef} version={d.n} />}
         {p.tab === "diffs" && <>
           <ComparePanel diff={p.compare} onDiff={p.onCompare} onPickRef={p.onPickRef} />

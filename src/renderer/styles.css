@@ -377,3 +377,22 @@ button.tiny { padding: 0 6px; font-size: 11px; }
 .cmp-row.add { color: var(--ok); } .cmp-row.del { color: var(--bad); }
 .compare .refs { display: flex; flex-wrap: wrap; gap: 3px; padding-left: 12px; }
 .ref-btn { flex: none; }
+
+/* checks sub-tabs, rules, polarity */
+.checks-tab { display: flex; flex-direction: column; height: 100%; }
+.sub-seg { display: flex; gap: 2px; padding: 6px 8px 2px; }
+.sub-seg button { flex: 1; padding: 3px 4px; font-size: 12px; }
+.sub-seg .count { margin-left: 4px; padding: 0 5px; border-radius: 8px; background: #6b2a2f; color: #ffd0d0; font-size: 10.5px; }
+.rules, .polarity { display: flex; flex-direction: column; gap: 6px; padding: 4px 0 10px; min-height: 0; }
+.rule-form { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; border-top: 1px solid var(--line); }
+.row-flex { display: flex; gap: 4px; flex-wrap: wrap; }
+.row-flex select { flex: 1; }
+.pol-row { padding: 5px 8px; border-top: 1px solid var(--line); }
+.pol-row.sel { background: #22385e; }
+.pol-head { display: flex; gap: 6px; align-items: center; }
+.pol-pins { display: flex; flex-wrap: wrap; gap: 2px 8px; color: var(--muted); margin: 2px 0 0 22px; overflow-wrap: anywhere; }
+.pol-pins .pin1 { color: #ffd25a; font-weight: 600; }
+.polarity .list-body { flex: 1; overflow: auto; }
+.limits { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 6px; padding: 4px 8px; }
+.limits label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); }
+.limits input, .limits select { width: 100%; }

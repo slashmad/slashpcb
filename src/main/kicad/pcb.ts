@@ -1,7 +1,7 @@
 // .kicad_pcb → BoardModel (absolute geometry in board millimetres, y down).
 // Supports KiCad 8/9 (numbered nets with a top-level net table) and KiCad 10 (net names inline).
 import { readFileSync } from "node:fs";
-import type { BoardModel, Footprint, LayerInfo, Pad, Shape, Track, Via, Zone } from "../../shared/types";
+import type { BoardModel, Footprint, LayerInfo, Pad, Shape, Stackup, Track, Via, Zone } from "../../shared/types";
 import { arcPoints, at, child, children, head, isList, num, parseSexpr, pts, str, type SList } from "./sexpr";
 
 type Xf = (x: number, y: number) => [number, number];
@@ -142,13 +142,13 @@ function pad(l: SList, fpX: Xf, copper: string[], netOf: (l: SList) => string): 
   const w = Number(size?.[1] ?? 0), h = Number(size?.[2] ?? size?.[1] ?? 0);
   const layers = expandLayers((child(l, "layers") ?? []).slice(1).map(String), copper);
   const drillNode = child(l, "drill");
-  let drill: number | undefined;
+  let drill: number | undefined, drillMin: number | undefined;
   if (drillNode) {
     const nums = drillNode.slice(1).filter((v): v is number => typeof v === "number");
-    if (nums.length) drill = Math.max(...nums);
+    if (nums.length) { drill = Math.max(...nums); drillMin = Math.min(...nums); }
   }
   const padX = placement(x, y, rot);
-  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, pinFunction: str(l, "pinfunction") };
+  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, drillMin, pinFunction: str(l, "pinfunction") };
   if (shp === "circle") p.r = w / 2;
   else if (shp === "oval") p.polys = [mapPts(ovalPoly(w, h), padX)];
   else if (shp === "roundrect" || shp === "chamfered_rect") p.polys = [mapPts(rectPoly(w, h, (num(l, "roundrect_rratio") ?? 0.25) * Math.min(w, h)), padX)];
@@ -318,7 +318,11 @@ export function parseBoard(file: string, text?: string): BoardModel {
     } else if (h === "via") {
       const [x, y] = at(it);
       const ls = (child(it, "layers") ?? []).slice(1).map(String);
-      const v: Via = { x, y, size: num(it, "size") ?? 0.6, drill: num(it, "drill") ?? 0.3, layers: [ls[0] ?? "F.Cu", ls[1] ?? "B.Cu"], net: netOf(it), type: typeof it[1] === "string" ? it[1] : undefined };
+      const tent = child(it, "tenting");
+      const v: Via = {
+        x, y, size: num(it, "size") ?? 0.6, drill: num(it, "drill") ?? 0.3, layers: [ls[0] ?? "F.Cu", ls[1] ?? "B.Cu"], net: netOf(it), type: typeof it[1] === "string" ? it[1] : undefined,
+        tenting: tent ? { front: str(tent, "front") ?? "none", back: str(tent, "back") ?? "none" } : undefined,
+      };
       vias.push(v);
       if (v.net) nets.add(v.net);
     } else if (h === "zone") {
@@ -346,11 +350,30 @@ export function parseBoard(file: string, text?: string): BoardModel {
   }
   if (!Number.isFinite(bbox[0])) bbox.splice(0, 4, 0, 0, 100, 80);
 
+  // Stackup (setup › stackup): layer materials and thicknesses, mask/silk colours, surface finish.
+  const setup = child(root, "setup");
+  const su = child(setup, "stackup");
+  let stackup: Stackup | undefined;
+  if (su) {
+    stackup = { layers: [], finish: str(su, "copper_finish") };
+    for (const l of children(su, "layer")) {
+      const name = String(l[1] ?? ""), type = str(l, "type") ?? "";
+      const e: Stackup["layers"][number] = { name, type, thickness: num(l, "thickness"), material: str(l, "material"), color: str(l, "color"), epsilonR: num(l, "epsilon_r") };
+      stackup.layers.push(e);
+      if (name === "F.Mask") stackup.maskColorTop = e.color;
+      if (name === "B.Mask") stackup.maskColorBottom = e.color;
+      if (name === "F.SilkS") stackup.silkColorTop = e.color;
+      if (name === "B.SilkS") stackup.silkColorBottom = e.color;
+    }
+  }
+  const tentDefault = child(setup, "tenting");
+  if (tentDefault) (stackup ??= { layers: [] }).tentingDefault = { front: str(tentDefault, "front") ?? "no", back: str(tentDefault, "back") ?? "no" };
+
   const tb = child(root, "title_block");
   return {
     file, version: num(root, "version") ?? 0, generator: str(root, "generator") ?? "",
     title: str(tb, "title"), rev: str(tb, "rev"), date: str(tb, "date"),
-    thickness: num(child(root, "general"), "thickness"),
+    thickness: num(child(root, "general"), "thickness"), stackup,
     layers, copper, bbox, footprints, tracks, vias, zones, graphics,
     nets: [...nets].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })),
     stats: { footprints: footprints.length, pads: padCount, tracks: tracks.length, vias: vias.length, zones: zones.length, nets: nets.size, trackLengthMm: Math.round(trackLen * 10) / 10 },

@@ -312,7 +312,7 @@ export class CodexSession extends AgentSession {
 /** Longest SlashPCB tool name mentioned in an approval message (e.g. "…tool `export_release`…"). */
 const ALL_TOOLS = ["get_design", "list_components", "get_component", "list_nets", "get_net", "run_checks", "render_view", "highlight",
   "list_annotations", "resolve_annotation", "kicad_live_status", "kicad_select", "kicad_move", "kicad_set_value", "kicad_refill_zones",
-  "kicad_save", "set_fields", "release_preflight", "export_release", "list_releases", "compare_revision"];
+  "kicad_save", "set_fields", "release_preflight", "export_release", "list_releases", "compare_revision", "list_rules", "add_rule", "remove_rule", "polarity_review"];
 export function toolNameIn(text: string): string | undefined {
   const hits = ALL_TOOLS.filter((t) => new RegExp(`(^|[^a-z_])${t}([^a-z_]|$)`).test(text));
   // Several names (unusual): treat as the most dangerous one by preferring a non-read-only tool.

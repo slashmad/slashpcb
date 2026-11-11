@@ -7,6 +7,8 @@ import type { KicadBridge } from "./kicad/bridge";
 import { summarizeReport } from "./kicad/checks";
 import { compareWithFolder, compareWithGit, diffText } from "./kicad/compare";
 import { setFields } from "./kicad/edit";
+import { describeRule, type Rule } from "./kicad/invariants";
+import { polarityText } from "./kicad/polarity";
 import { PROFILES } from "./kicad/release";
 import { listPackages, preflightText, releaseRoot, runPreflight, runRelease } from "./releases";
 import { runCli } from "./kicad/cli";
@@ -399,6 +401,53 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
     summarize: (a) => `Fields on ${(a.refs ?? []).join(", ")}`,
   });
 
+  // ---------------------------------------------------------------- design invariants and polarity
+  hub.register("list_rules", {
+    description: "The project's design invariants (slashpcb.rules.json) and their current result: pin→net patterns, required footprints, nets allowed on a layer, locked positions, parts that must exist, and the design-rule floor.",
+    inputSchema: { type: "object", properties: {} },
+    async run() {
+      const p = need();
+      const { file, data } = p.rulesData();
+      if (!data.rules.length) return text(`No design invariants yet. They would be stored in ${p.rulesWritePath()}.`);
+      const rep = p.design.rules;
+      const lines = [`${data.rules.length} rule(s) in ${file}; ${rep ? `${rep.errors} error(s), ${rep.warnings} warning(s)` : "not evaluated yet"}`];
+      for (const r of data.rules) {
+        const v = rep?.violations.filter((x) => x.type.startsWith(`${r.id}:`)) ?? [];
+        lines.push(`${r.id} [${r.kind}${r.severity === "warning" ? ", warning" : ""}] ${describeRule(r)}${r.note ? ` — ${r.note}` : ""}: ${v.length ? `VIOLATED — ${v.map((x) => x.items.slice(0, 4).map((i) => i.description).join("; ") || x.description).join(" | ")}` : "holds"}`);
+      }
+      return text(lines.join("\n"), !!rep?.errors);
+    },
+  });
+
+  hub.register("add_rule", {
+    description: "Add a design invariant (asks the user). Kinds: pin_net {pins:'D*.1', net:'COL*' or '!GND'}, pin_unconnected {pins:'U8.5'}, footprint {refs:'U1', footprint:'Lib:Name*'}, layer_nets {layer:'In2.Cu', nets:'GND'}, locked {refs:'SW*'} (snapshots current positions), part_present {refs:'U1 J1'}, rules_floor {} (snapshots current design rules; later relaxations fail). Globs use * and ?. Prefer narrow patterns (e.g. 'D0? D1?' rather than 'D*' when other diodes exist).",
+    inputSchema: { type: "object", properties: {
+      kind: { type: "string", enum: ["pin_net", "pin_unconnected", "footprint", "layer_nets", "locked", "part_present", "rules_floor"] },
+      pins: { type: "string" }, net: { type: "string" }, refs: { type: "string" }, footprint: { type: "string" }, layer: { type: "string" }, nets: { type: "string" },
+      tolerance: { type: "number" }, severity: { type: "string", enum: ["error", "warning"] }, note: { type: "string" },
+    }, required: ["kind"] },
+    async run(a) {
+      const p = need();
+      const rule = p.addRule({ kind: a.kind, pins: a.pins, net: a.net, refs: a.refs, footprint: a.footprint, layer: a.layer, nets: a.nets, tolerance: a.tolerance, severity: a.severity, note: a.note } as Rule);
+      p.refreshRules();
+      const v = p.design.rules?.violations.filter((x) => x.type.startsWith(`${rule.id}:`)) ?? [];
+      return text(`Added ${rule.id}: ${describeRule(rule)} → ${v.length ? `currently VIOLATED: ${v.map((x) => x.description).join("; ")}` : "holds now"}. Stored in ${p.rulesData().file}.`);
+    },
+    summarize: (a) => `Rule ${a.kind}`,
+  });
+
+  hub.register("remove_rule", {
+    description: "Remove a design invariant by id (asks the user).",
+    inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+    async run(a) { const p = need(); const ok = p.removeRule(String(a.id)); p.refreshRules(); return text(ok ? `Removed ${a.id}.` : `No rule ${a.id}.`, !ok); },
+  });
+
+  hub.register("polarity_review", {
+    description: "Polarized and multi-pin parts (ICs, transistors, diodes, LEDs, polarized capacitors, connectors) with pad numbers, pin names and nets, side and rotation, contradictions (ground pin on a signal net, supply pin on ground, NC pin connected, unflipped bottom-side copy) and whether the user has verified each against the datasheet. Wrong land-pattern pin order is invisible to DRC: point the user to parts that deserve a look; only the user marks parts verified.",
+    inputSchema: { type: "object", properties: { only_open: { type: "boolean", description: "only unverified parts or parts with issues" } } },
+    async run(a) { const p = need(); return text(polarityText(p.polarity(), !!a.only_open)); },
+  });
+
   // ---------------------------------------------------------------- release packages
   hub.register("release_preflight", {
     description: `Check whether the board is ready for a fabrication/assembly package for a supplier profile (${PROFILES.map((x) => x.id).join(", ")}): ERC/DRC, unrouted, schematic parity, parts inside the outline, paste on THT pads, unique references, part numbers, bottom-side assembly. Runs fresh checks. Read-only.`,
@@ -413,10 +462,10 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
 
   hub.register("export_release", {
     description: "Write a fabrication/assembly package for a supplier profile: Gerber + Excellon zip, BOM and CPL in the supplier's columns, KiCad position file, MANIFEST.json with SHA-256 hashes and README.txt. Goes to <project>/fab/<name> (frozen projects: SlashPCB's own data folder). The package is never a release by itself; a failed preflight is written into it as PREFLIGHT_FAILED_DO_NOT_ORDER. Only when the user asked for a package.",
-    inputSchema: { type: "object", properties: { profile: { type: "string", enum: PROFILES.map((x) => x.id) } }, required: ["profile"] },
+    inputSchema: { type: "object", properties: { profile: { type: "string", enum: PROFILES.map((x) => x.id) }, include_step: { type: "boolean", description: "PCBA STEP in review/ (default true; slow on large boards)" } }, required: ["profile"] },
     async run(a) {
       const p = need();
-      const r = await runRelease(p, a.profile, ctx.appVersion);
+      const r = await runRelease(p, a.profile, ctx.appVersion, undefined, { step: a.include_step !== false });
       return text([`Package written in ${r.seconds.toFixed(1)} s: ${r.dir}`, ...r.files.map((f) => `  ${f.slice(r.dir.length + 1)}`), "", preflightText(r.preflight)].join("\n"), !r.preflight.ok);
     },
     summarize: (a) => `Package ${a.profile}`,
@@ -445,12 +494,12 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
       let d;
       if (a.git_rev || !a.path) {
         if (!p.info.pcb) return text("No board in this project.", true);
-        d = await compareWithGit(p.dir, p.info.pcb, p.design, String(a.git_rev ?? "HEAD"));
+        d = await compareWithGit(p.dir, p.info.pcb, p.design, String(a.git_rev ?? "HEAD"), p.designRules());
       } else {
         const target = isAbsolute(String(a.path)) ? String(a.path) : join(p.dir, String(a.path));
         const r = resolveProject(target);
         if (!r) return text(`No KiCad project at ${target}.`, true);
-        d = compareWithFolder(r.dir, r.pro.replace(/\.kicad_pro$/i, ""), p.design);
+        d = compareWithFolder(r.dir, r.pro.replace(/\.kicad_pro$/i, ""), p.design, p.designRules());
       }
       ctx.showCompare(d);
       return text(diffText(d, a.max ?? 40));

@@ -5,8 +5,8 @@
 // network step, started only by the user). Nothing runs until the user enables the live link.
 import { spawn, execFile, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
 import { kicadEnv } from "./cli";
 
 export interface BridgeStatus { enabled: boolean; running: boolean; connected: boolean; version?: string | null; boards?: string[]; error?: string; python?: string | null }
@@ -122,4 +122,11 @@ export async function setupBridge(userData: string, log: (l: string) => void): P
     log("kicad-python could not be installed with this Python; trying the next one.");
   }
   throw new Error("No suitable Python found (3.11–3.13 recommended). Install Python 3.13 and try again.");
+}
+
+/** Same file on disk (symlinks resolved; case-insensitive on Windows). Never compares bare file names. */
+export function sameFile(a: string, b: string): boolean {
+  if (!a || !b || !isAbsolute(a) || !isAbsolute(b)) return false;
+  const canon = (p: string) => { let r = resolve(p); try { r = realpathSync(r); } catch { /* missing: compare as given */ } return process.platform === "win32" ? r.toLowerCase() : r; };
+  return canon(a) === canon(b);
 }

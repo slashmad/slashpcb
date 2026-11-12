@@ -20,7 +20,7 @@ const PLACEHOLDER: Record<string, string> = { reference: "Lib:Name  or  path/to/
 
 export function RulesPanel({ version, selectedRef, onPickRef }: { version: number; selectedRef: string | null; onPickRef(r: string): void }) {
   const t = useT();
-  const [data, setData] = useState<{ file: string | null; writePath: string; rules: RuleRow[]; report: { errors: number; warnings: number; violations: Violation[] } | null } | null>(null);
+  const [data, setData] = useState<{ file: string | null; error?: string; writePath: string; rules: RuleRow[]; report: { errors: number; warnings: number; violations: Violation[] } | null } | null>(null);
   const [kind, setKind] = useState("pin_net");
   const [form, setForm] = useState<Record<string, string>>({});
   const [err, setErr] = useState<string | null>(null);
@@ -39,6 +39,7 @@ export function RulesPanel({ version, selectedRef, onPickRef }: { version: numbe
     <div className="rules">
       <div className="muted small pad-x">{t("rules.explain")}</div>
       {data && <div className="muted small pad-x" title={data.file ?? data.writePath}>{t("rules.file")}: {(data.file ?? data.writePath).split(/[\\/]/).slice(-2).join("/")}</div>}
+      {data?.error && <div className="rel-verdict bad">{data.error}</div>}
       {data?.report && <div className={`rel-verdict ${data.report.errors ? "bad" : "ok"}`}>{data.report.errors ? t("rules.violated", { n: data.report.errors }) : t("rules.hold", { n: data.rules.length })}</div>}
       <div className="gates">
         {data?.rules.map((r) => {
@@ -73,7 +74,7 @@ export function RulesPanel({ version, selectedRef, onPickRef }: { version: numbe
   );
 }
 
-interface PolEntry { ref: string; value: string; lib: string; side: "F" | "B"; rot: number; kind: string; pins: { num: string; name: string; net: string }[]; issues: { level: string; text: string }[]; fingerprint: string; verified?: string }
+interface PolEntry { ref: string; value: string; lib: string; side: "F" | "B"; rot: number; kind: string; pins: { num: string; name: string; net: string }[]; issues: { level: string; text: string }[]; fingerprint: string; verified?: string; stale?: string[] }
 
 export function PolarityPanel({ version, selectedRef, onPickRef }: { version: number; selectedRef: string | null; onPickRef(r: string): void }) {
   const t = useT();
@@ -99,6 +100,7 @@ export function PolarityPanel({ version, selectedRef, onPickRef }: { version: nu
               <span className="muted small">{t(`pol.kind.${e.kind}`)} · {e.side === "B" ? t("board.bottom") : t("board.top")} · {e.rot}°</span>
             </div>
             <div className="pol-pins small">{e.pins.slice(0, 16).map((p) => <span key={p.num} className={p.num === "1" || p.num === "A1" ? "pin1" : ""}>{p.num}{p.name ? `(${p.name})` : ""}={p.net ? p.net.replace(/^\//, "") : "–"}</span>)}{e.pins.length > 16 ? " …" : ""}</div>
+            {e.stale && <div className="small warn">{t("pol.stale", { what: e.stale.join(", ") })}</div>}
             {e.issues.map((i, k) => <div key={k} className={`small ${i.level === "error" ? "bad" : i.level === "warning" ? "warn" : "muted"}`}>{i.text}</div>)}
           </div>
         ))}

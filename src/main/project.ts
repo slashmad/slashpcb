@@ -10,8 +10,8 @@ import { basename, dirname, join, relative, sep } from "node:path";
 import type { CheckReport, DesignSnapshot, FileDiff, FileNode, KicadLock, PipelineState, ProjectInfo } from "../shared/types";
 import { runDrc, runErc } from "./kicad/checks";
 import { loadDesignRules, type DesignRules } from "./kicad/designrules";
-import { evaluateRules, newRuleId, prepareRule, readRules, rulesFileName, writeRules, type Rule } from "./kicad/invariants";
-import { polarityReview, type PolarityEntry } from "./kicad/polarity";
+import { evaluateRules, newRuleId, prepareRule, readRules, rulesFileName, validateRule, writeRules, type Rule } from "./kicad/invariants";
+import { polarityReview, type PolarityEntry, type PolarityVerification } from "./kicad/polarity";
 import { kicadCliPath, runCli } from "./kicad/cli";
 import { libraryMap } from "./kicad/libfp";
 import { duplicateUuids } from "./kicad/analysis";
@@ -348,13 +348,20 @@ export class KicadProject extends EventEmitter {
     return loadDesignRules(join(this.dir, this.pro), join(this.dir, `${this.stem}.kicad_dru`));
   }
 
-  /** Rules live in the project unless it is frozen/read-only; then in SlashPCB's state folder. */
+  private locked(): boolean { return this.info.frozen || !this.info.writable; }
+
+  /**
+   * One effective rules source. Writable project: the project file (a state copy left from a frozen
+   * period is the fallback). Frozen/read-only: SlashPCB's state copy, which is seeded from the project
+   * file on the first change and then holds the whole effective set; the original is never written.
+   */
   rulesWritePath(): string {
-    return this.info.frozen || !this.info.writable ? join(this.stateDir, "rules.json") : join(this.dir, rulesFileName);
+    return this.locked() ? join(this.stateDir, "rules.json") : join(this.dir, rulesFileName);
   }
 
   rulesData() {
-    return readRules([join(this.dir, rulesFileName), join(this.stateDir, "rules.json")]);
+    const proj = join(this.dir, rulesFileName), state = join(this.stateDir, "rules.json");
+    return readRules(this.locked() ? [state, proj] : [proj, state]);
   }
 
   /** Duplicated UUIDs across the board and every schematic sheet file. */
@@ -374,15 +381,18 @@ export class KicadProject extends EventEmitter {
 
   private evaluateRulesInto(d: DesignSnapshot): void {
     try {
-      const { file, data } = this.rulesData();
-      d.rules = data.rules.length ? evaluateRules(file, data, d.board, d.schematic, this.designRules(), this.libs()) : null;
+      const { file, data, error } = this.rulesData();
+      d.rules = data.rules.length || error ? evaluateRules(file, data, d.board, d.schematic, this.designRules(), this.libs(), error) : null;
       d.rulesFile = file;
     } catch (e: any) { d.errors.push(`rules: ${e?.message ?? e}`); }
   }
 
   addRule(r: Omit<Rule, "id"> & { id?: string }): Rule {
-    const { file, data } = this.rulesData();
-    const target = file && !(file.startsWith(this.dir) && (this.info.frozen || !this.info.writable)) ? file : this.rulesWritePath();
+    const { file, data, error } = this.rulesData();
+    if (error) throw new Error(`the rules file ${file} is invalid (${error}); fix it first, SlashPCB will not overwrite it`);
+    const problem = validateRule({ ...r, id: r.id ?? "new" });
+    if (problem) throw new Error(problem.replace(/^new: /, ""));
+    const target = this.rulesWritePath();
     const rule = prepareRule({ ...r, id: r.id ?? newRuleId(data.rules) } as Rule, this.design.board, this.designRules());
     data.rules = [...data.rules.filter((x) => x.id !== rule.id), rule];
     writeRules(target, data);
@@ -390,12 +400,13 @@ export class KicadProject extends EventEmitter {
   }
 
   removeRule(id: string): boolean {
-    const { file, data } = this.rulesData();
+    const { file, data, error } = this.rulesData();
     if (!file) return false;
+    if (error) throw new Error(`the rules file ${file} is invalid (${error}); fix it first, SlashPCB will not overwrite it`);
     const n = data.rules.length;
     data.rules = data.rules.filter((r) => r.id !== id);
     if (data.rules.length === n) return false;
-    writeRules(file, data);
+    writeRules(this.rulesWritePath(), data); // frozen: the state copy, never the original
     return true;
   }
 
@@ -411,7 +422,8 @@ export class KicadProject extends EventEmitter {
 
   /** Same placement rule as the invariants file: the project unless frozen/read-only. */
   partsData() {
-    return readParts([join(this.dir, partsFileName), join(this.stateDir, "parts.json")]);
+    const proj = join(this.dir, partsFileName), state = join(this.stateDir, "parts.json");
+    return readParts(this.locked() ? [state, proj] : [proj, state]);
   }
   partLines(): PartLine[] {
     return partLines(this.design.board, this.design.schematic, this.partsData().data.parts);
@@ -426,9 +438,8 @@ export class KicadProject extends EventEmitter {
       else if (s) key = partKey({ value: s.value, lib: s.footprint, fields: s.fields });
       else throw new Error(`no part ${keyOrRef}`);
     }
-    const { file, data } = this.partsData();
-    const locked = this.info.frozen || !this.info.writable;
-    const target = file && !(file.startsWith(this.dir) && locked) ? file : locked ? join(this.stateDir, "parts.json") : join(this.dir, partsFileName);
+    const { data } = this.partsData();
+    const target = this.locked() ? join(this.stateDir, "parts.json") : join(this.dir, partsFileName);
     const clean = note ? cleanNote({ ...(replace ? {} : data.parts[key] ?? {}), ...note } as any) : null;
     if (!clean || isEmptyNote(clean)) delete data.parts[key];
     else data.parts[key] = { ...clean, updatedAt: new Date().toISOString() };
@@ -437,13 +448,18 @@ export class KicadProject extends EventEmitter {
   }
 
   private polarityFile() { return join(this.stateDir, "polarity.json"); }
-  private polarityVerified(): Record<string, { fingerprint: string; at: string }> {
+  private polarityVerified(): Record<string, PolarityVerification> {
     try { return JSON.parse(readFileSync(this.polarityFile(), "utf8")); } catch { return {}; }
   }
   polarity(): PolarityEntry[] { return polarityReview(this.design.board, this.polarityVerified(), this.design.schematic, this.libs()); }
   setPolarityVerified(ref: string, fingerprint: string | null): PolarityEntry[] {
     const v = this.polarityVerified();
-    if (fingerprint) v[ref] = { fingerprint, at: new Date().toISOString() }; else delete v[ref];
+    if (fingerprint) {
+      // Only the current state can be verified: the tick stores what exactly was reviewed.
+      const e = this.polarity().find((x) => x.ref === ref);
+      if (!e || e.fingerprint !== fingerprint) throw new Error(`${ref} changed since it was shown; review it again`);
+      v[ref] = { fingerprint, at: new Date().toISOString(), identity: e.identity };
+    } else delete v[ref];
     writeFileSync(this.polarityFile(), JSON.stringify(v, null, 1));
     return this.polarity();
   }

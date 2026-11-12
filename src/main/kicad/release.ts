@@ -6,7 +6,7 @@
 // rotations differ per assembler. The gates below make those visible before anything is sent.
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import type { BoardModel, CheckReport, Footprint, SchematicModel } from "../../shared/types";
@@ -159,6 +159,7 @@ export function preflight(profileId: string, b: BoardModel | null, sch: Schemati
     return { profile: profile.id, ok: false, gates, assembled: 0, ranAt: Date.now() };
   }
   // Checks.
+  if (!sch) add({ id: "schematic", title: "Schematic", status: "warn", detail: "No schematic in this project: ERC, schematic ↔ board parity and schematic part checks are NOT covered (missing coverage, not a pass)." });
   if (!erc && sch) add({ id: "erc", title: "ERC", status: "fail", detail: "ERC has not run yet." });
   else if (erc) add({ id: "erc", title: "ERC", status: !erc.ok || erc.errors ? "fail" : erc.warnings ? "warn" : "pass", detail: erc.ok ? `${erc.errors} error(s), ${erc.warnings} warning(s)` : `failed: ${erc.error}` });
   if (!drc) add({ id: "drc", title: "DRC", status: "fail", detail: "DRC has not run yet." });
@@ -309,8 +310,15 @@ export async function exportRelease(o: {
   profileId: string; board: BoardModel; schematic: SchematicModel | null; erc: CheckReport | null; drc: CheckReport | null;
   projectDir: string; shadowDir: string; pcb: string; sourceFiles: string[]; outDir: string; appVersion: string; kicadVersion: string | null; timeoutMs: number;
   extras?: PreflightExtras; review?: boolean; step?: boolean;
+  /** Hashes of the input files taken before the checks ran; the package is bound to these bytes. */
+  inputHashes?: Record<string, string>;
+  /** Test hook: runs after the exports, before the final input check. */
+  afterExports?: () => void;
 }): Promise<ReleaseResult> {
   const t0 = Date.now();
+  const inputs = o.inputHashes ?? hashInputs(o.sourceFiles);
+  const stale = () => changedInputs(inputs);
+  if (stale().length) throw new Error(`the project changed after its checks ran (${stale().join(", ")}); run the release again`);
   const profile = PROFILES.find((p) => p.id === o.profileId) ?? PROFILES[0];
   const pf = preflight(profile.id, o.board, o.schematic, o.erc, o.drc, o.extras);
   mkdirSync(o.outDir, { recursive: true });
@@ -436,6 +444,17 @@ export async function exportRelease(o: {
   writeFileSync(spec, buildSpec(b, stem, profile, o.extras, parts));
   extra.push(spec);
 
+  // kicad-cli read the live project files: if any input changed while the package was made, the outputs
+  // and the checks no longer belong to the same bytes. Never publish such a package.
+  o.afterExports?.();
+  const changed = stale();
+  if (changed.length) {
+    writeFileSync(join(o.outDir, "INVALID.txt"), `This package is INVALID and must not be ordered: these inputs changed while it was being made:\n${changed.join("\n")}\n\nRun the release again.\n`);
+    const bad = `${o.outDir}-INVALID`;
+    try { renameSync(o.outDir, bad); } catch { /* keep the marker in place */ }
+    throw new Error(`the project changed while the package was made (${changed.join(", ")}); the folder was marked INVALID. Run the release again.`);
+  }
+
   // Manifest + readme.
   const git = await new Promise<string | null>((res) => execFile("git", ["-C", o.projectDir, "rev-parse", "--short", "HEAD"], { env: kicadEnv(), timeout: 5000 }, (e, out) => res(e ? null : out.trim())));
   const outputs = [...gerbers.map((g) => join(gerberDir, g)), zipFile, bomFile, cplFile, posFile, ...(sourcingFile ? [sourcingFile] : []), ...extra];
@@ -444,7 +463,8 @@ export async function exportRelease(o: {
     profile: { id: profile.id, name: profile.name }, board: { file: basename(o.pcb), title: b.title, rev: b.rev, sizeMm: [+(b.bbox[2] - b.bbox[0]).toFixed(3), +(b.bbox[3] - b.bbox[1]).toFixed(3)], copperLayers: b.copper.length, thicknessMm: b.thickness },
     projectGit: git, status: pf.ok ? "PREFLIGHT_PASSED_NOT_RELEASED" : "PREFLIGHT_FAILED_DO_NOT_ORDER",
     preflight: pf.gates.map((g) => ({ id: g.id, status: g.status, detail: g.detail, refs: g.refs?.slice(0, 50) })),
-    sources: o.sourceFiles.filter((f) => existsSync(f)).map((f) => ({ file: relative(o.projectDir, f).split("\\").join("/"), sha256: sha256(f), bytes: statSync(f).size })),
+    // The bytes the checks ran on (verified unchanged after the exports).
+    sources: Object.entries(inputs).filter(([, h]) => h !== "missing").map(([f, h]) => ({ file: relative(o.projectDir, f).split("\\").join("/"), sha256: h, bytes: statSync(f).size })),
     outputs: outputs.map((f) => ({ file: relative(o.outDir, f).split("\\").join("/"), sha256: sha256(f), bytes: statSync(f).size })),
     counts: { placedParts: parts.length, bomLines: groups.size, bottomParts: parts.filter((f) => f.side === "B").length },
   };
@@ -497,26 +517,107 @@ export function readBack(gerberDir: string, b: BoardModel, stem: string): Gate {
       notes.push(`${fns.length} Gerber files in the job`);
     } catch (e: any) { problems.push(`Gerber job unreadable: ${e?.message ?? e}`); }
   }
-  // Excellon hits: one coordinate line per hole (slots: one G85 line).
-  const hits = (name: string) => {
-    const f = files.find((x) => x.endsWith(name));
-    if (!f) return null;
-    return readFileSync(join(gerberDir, f), "utf8").split(/\r?\n/).filter((l) => /^X-?[\d.]+Y-?[\d.]+/.test(l) || /^Y-?[\d.]+/.test(l)).length;
-  };
-  const pth = hits("-PTH.drl"), npth = hits("-NPTH.drl");
-  const throughVias = b.vias.filter((v) => !v.type || v.type === "through").length;
-  let expPth = throughVias, expNpth = 0;
-  for (const f of b.footprints) for (const p of f.pads) {
-    if (!p.drill) continue;
-    if (p.type === "np_thru_hole") expNpth++; else if (p.type === "thru_hole") expPth++;
+  // Every Gerber the job lists must exist and be non-empty (job metadata alone proves nothing).
+  if (job) {
+    try {
+      const j = JSON.parse(readFileSync(join(gerberDir, job), "utf8"));
+      for (const fa of j.FilesAttributes ?? []) {
+        const path = String(fa.Path ?? "");
+        if (!path || !files.includes(path)) problems.push(`job lists ${path || "a file without a path"}, which was not written`);
+        else if (statSync(join(gerberDir, path)).size < 64 || !/%FS|%MO|G04/.test(readFileSync(join(gerberDir, path), "utf8").slice(0, 4000))) problems.push(`${path} is empty or not a Gerber file`);
+      }
+    } catch { /* reported above */ }
   }
-  if (pth === null && expPth) problems.push("no plated drill file");
-  else if (pth !== null && pth !== expPth) problems.push(`plated drill hits ${pth}, board has ${expPth} (vias ${throughVias} + plated pad holes)`);
-  if (npth === null && expNpth) problems.push("no non-plated drill file");
-  else if (npth !== null && npth !== expNpth) problems.push(`non-plated drill hits ${npth}, board has ${expNpth}`);
-  if (pth !== null) notes.push(`${pth} plated and ${npth ?? 0} non-plated holes match the board`);
+  // Drill read-back: every expected hole (via, plated pad hole, non-plated hole, slot) must appear in the
+  // right file at its position with its tool diameter (slots: tool = slot width, length end to end).
+  const read = (suffix: string) => { const f = files.find((x) => x.endsWith(suffix)); return f ? parseExcellon(readFileSync(join(gerberDir, f), "utf8")) : null; };
+  const pth = read("-PTH.drl"), npth = read("-NPTH.drl");
+  const expPth: ExpectedHole[] = [], expNpth: ExpectedHole[] = [];
+  for (const v of b.vias) if (!v.type || v.type === "through") expPth.push({ what: `via ${v.net || ""} (${v.x}, ${v.y})`.replace("  ", " "), x: v.x, y: v.y, d: v.drill });
+  for (const f of b.footprints) for (const p of f.pads) {
+    if (!p.drill || (p.type !== "thru_hole" && p.type !== "np_thru_hole")) continue;
+    const [hx, hy] = p.hole ?? [p.x, p.y];
+    const slot = p.drillMin !== undefined && p.drillMin !== p.drill;
+    const h: ExpectedHole = { what: `${f.ref}.${p.num}`, x: hx, y: hy, d: slot ? p.drillMin! : p.drill, len: slot ? p.drill : undefined };
+    (p.type === "np_thru_hole" ? expNpth : expPth).push(h);
+  }
+  const check = (label: string, exp: ExpectedHole[], got: DrillHit[] | null) => {
+    if (!got) { if (exp.length) problems.push(`no ${label} drill file`); return; }
+    const r = matchHoles(exp, got);
+    if (r.missing.length) problems.push(`${label}: ${r.missing.length} expected hole(s) not found at their position with their size (${r.missing.slice(0, 4).join("; ")}${r.missing.length > 4 ? " …" : ""})`);
+    if (r.extra.length) problems.push(`${label}: ${r.extra.length} hole(s) in the file that the board does not have (${r.extra.slice(0, 3).join("; ")})`);
+    if (!r.missing.length && !r.extra.length) notes.push(`${got.length} ${label} holes match the board by position and tool (largest diameter rounding ${r.maxRound.toFixed(4)} mm)`);
+  };
+  check("plated", expPth, pth);
+  check("non-plated", expNpth, npth);
   void stem;
-  return { id: "readback", title: "Exports read back", status: problems.length ? "fail" : "pass", detail: problems.length ? problems.join("; ") : notes.join("; ") };
+  const uniq = [...new Set(problems)];
+  return { id: "readback", title: "Exports read back", status: uniq.length ? "fail" : "pass", detail: uniq.length ? uniq.join("; ") : notes.join("; ") };
+}
+
+/** SHA-256 per input file ("missing" for absent files). */
+export function hashInputs(files: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const f of [...new Set(files)].sort()) out[f] = existsSync(f) ? sha256(f) : "missing";
+  return out;
+}
+/** Inputs whose bytes differ from `before` (or that appeared/disappeared). */
+export function changedInputs(before: Record<string, string>): string[] {
+  return Object.entries(before).filter(([f, h]) => (existsSync(f) ? sha256(f) : "missing") !== h).map(([f]) => basename(f));
+}
+
+export interface DrillHit { x: number; y: number; d: number; len?: number }
+interface ExpectedHole { what: string; x: number; y: number; d: number; len?: number }
+
+/** Excellon (KiCad: metric, decimal, absolute) → holes in board coordinates (Y down) with tool diameters. Slots: G85 or M15/M16 routes. */
+export function parseExcellon(text: string): DrillHit[] {
+  const tools = new Map<string, number>();
+  const out: DrillHit[] = [];
+  let tool = 0, start: [number, number] | null = null;
+  const xy = (s: string) => { const m = /X(-?[\d.]+)Y(-?[\d.]+)/.exec(s); return m ? [Number(m[1]), -Number(m[2])] as [number, number] : null; };
+  for (const raw of text.split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l || l.startsWith(";")) continue;
+    let m = /^T(\d+)C([\d.]+)/.exec(l);
+    if (m) { tools.set(m[1], Number(m[2])); continue; }
+    m = /^T(\d+)$/.exec(l);
+    if (m) { tool = tools.get(m[1]) ?? 0; continue; }
+    if (l.includes("G85")) {
+      const [a, c] = l.split("G85").map(xy);
+      if (a && c) out.push({ x: (a[0] + c[0]) / 2, y: (a[1] + c[1]) / 2, d: tool, len: Math.hypot(c[0] - a[0], c[1] - a[1]) + tool });
+      continue;
+    }
+    if (/^G00/.test(l)) { start = xy(l); continue; }
+    if (/^G01/.test(l) && start) { const e = xy(l); if (e) out.push({ x: (start[0] + e[0]) / 2, y: (start[1] + e[1]) / 2, d: tool, len: Math.hypot(e[0] - start[0], e[1] - start[1]) + tool }); start = null; continue; }
+    if (/^X-?[\d.]+Y-?[\d.]+$/.test(l)) { const p = xy(l)!; out.push({ x: p[0], y: p[1], d: tool }); }
+  }
+  return out;
+}
+
+/** One-to-one matching of expected holes to drilled hits (position ≤ 0.005 mm, diameter and slot length ≤ 0.005 mm). */
+export function matchHoles(exp: ExpectedHole[], got: DrillHit[], posTol = 0.005, dTol = 0.005): { missing: string[]; extra: string[]; maxRound: number } {
+  const used = new Set<number>();
+  const missing: string[] = [];
+  let maxRound = 0;
+  const grid = new Map<string, number[]>();
+  const key = (x: number, y: number) => `${Math.round(x)},${Math.round(y)}`;
+  got.forEach((g, i) => { const k = key(g.x, g.y); (grid.get(k) ?? grid.set(k, []).get(k)!).push(i); });
+  for (const e of exp) {
+    let hit = -1;
+    for (let dx = -1; dx <= 1 && hit < 0; dx++) for (let dy = -1; dy <= 1 && hit < 0; dy++) {
+      for (const i of grid.get(`${Math.round(e.x) + dx},${Math.round(e.y) + dy}`) ?? []) {
+        const g = got[i];
+        if (used.has(i) || Math.hypot(g.x - e.x, g.y - e.y) > posTol || Math.abs(g.d - e.d) > dTol) continue;
+        if ((e.len === undefined) !== (g.len === undefined) || (e.len !== undefined && Math.abs(e.len - g.len!) > dTol)) continue;
+        hit = i; break;
+      }
+    }
+    if (hit < 0) { missing.push(`${e.what} Ø${e.d}${e.len ? `×${e.len}` : ""}`); continue; }
+    used.add(hit);
+    maxRound = Math.max(maxRound, Math.abs(got[hit].d - e.d));
+  }
+  const extra = got.map((g, i) => (used.has(i) ? null : `Ø${g.d} at (${+g.x.toFixed(3)}, ${+g.y.toFixed(3)})`)).filter((x): x is string => !!x);
+  return { missing, extra, maxRound };
 }
 
 /** A build specification the supplier can read next to the Gerbers. */

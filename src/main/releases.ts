@@ -3,7 +3,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { detectKicad } from "./kicad/cli";
-import { effectiveCaps, exportRelease, preflight, PROFILES, type Preflight, type PreflightExtras, type ReleaseResult } from "./kicad/release";
+import { effectiveCaps, exportRelease, hashInputs, preflight, PROFILES, type Preflight, type PreflightExtras, type ReleaseResult } from "./kicad/release";
 import { getSettings } from "./settings";
 import { maskWebs, testAccess, viasAtPaste } from "./kicad/analysis";
 import type { KicadProject } from "./project";
@@ -64,9 +64,15 @@ function maskSummary(r: NonNullable<ReturnType<typeof maskReport>>): PreflightEx
   return { minWeb: r.minWeb, source: r.thresholdSource, risky: risky.length, merged: risky.filter((w) => w.kind === "merged").length, narrowest: r.narrowest?.web, maskDefined: r.maskDefined.map((m) => m.ref), refs: [...new Set(risky.flatMap((w) => w.refs))] };
 }
 
+/** Parse failures of the latest run: the snapshot then still shows the previous, stale model. */
+const parseErrors = (errors: string[]) => errors.filter((e) => /^(board|schematic): /.test(e));
+
 export async function runPreflight(p: KicadProject, profileId: string, fresh = false): Promise<Preflight> {
   const d = fresh || !p.design.drc ? await p.request("release", { checks: true }) : p.design;
-  return preflight(profileId, d.board, d.schematic, d.erc, d.drc, preflightExtras(p, profileId));
+  const pf = preflight(profileId, d.board, d.schematic, d.erc, d.drc, preflightExtras(p, profileId));
+  const bad = parseErrors(d.errors);
+  if (bad.length) { pf.gates.unshift({ id: "parse", title: "Current files parsed", status: "fail", detail: `The latest save could not be read; these results belong to an earlier version: ${bad.join("; ")}` }); pf.ok = false; }
+  return pf;
 }
 
 /** Fresh checks, then the package. Refuses an output folder inside a frozen project. */
@@ -74,15 +80,29 @@ export async function runRelease(p: KicadProject, profileId: string, appVersion:
   if (!PROFILES.some((x) => x.id === profileId)) throw new Error(`unknown profile ${profileId} (use ${PROFILES.map((x) => x.id).join(", ")})`);
   const dir = outDir ?? defaultReleaseDir(p, profileId);
   if ((p.info.frozen || !p.info.writable) && (dir + "/").startsWith(p.dir + "/")) throw new Error("the project is frozen: write the package outside its folder");
-  const d = await p.request("release", { checks: true });
+  // Bind the checks to exact input bytes: hash, check, hash again; repeat if a save came in between.
+  const inputSet = () => {
+    const sheets = p.design.schematic?.sheets.map((s) => s.file) ?? [];
+    return [...new Set([p.info.pcb, p.info.pro, ...sheets, `${p.stem}.kicad_dru`, "fp-lib-table", "sym-lib-table", "slashpcb.rules.json", "slashpcb.parts.json"]
+      .filter(Boolean).map((f) => p.abs(f as string)))];
+  };
+  let d = p.design, before: Record<string, string> = {};
+  for (let attempt = 0; ; attempt++) {
+    before = hashInputs(inputSet());
+    d = await p.request("release", { checks: true });
+    const after = hashInputs(inputSet()); // the sheet list can change with the parse
+    if (JSON.stringify(after) === JSON.stringify(before)) { before = after; break; }
+    if (attempt >= 2) throw new Error("the project keeps changing while its checks run; save in KiCad, wait, and run the release again");
+  }
   if (!d.board || !p.info.pcb) throw new Error("this project has no board");
-  const sources = [p.info.pcb, p.info.pro, ...(d.schematic?.sheets.map((s) => s.file) ?? []), `${p.stem}.kicad_dru`].map((f) => p.abs(f));
+  const bad = parseErrors(d.errors);
+  if (bad.length) throw new Error(`the current files could not be read (${bad.join("; ")}); fix them before making a package`);
   const kicad = await detectKicad();
   return exportRelease({
     profileId, board: d.board, schematic: d.schematic, erc: d.erc, drc: d.drc,
-    projectDir: p.dir, shadowDir: p.shadowDir, pcb: p.info.pcb, sourceFiles: [...new Set(sources)],
+    projectDir: p.dir, shadowDir: p.shadowDir, pcb: p.info.pcb, sourceFiles: Object.keys(before),
     outDir: dir, appVersion, kicadVersion: kicad.version, timeoutMs: p.opts.timeoutSec * 1000,
-    extras: preflightExtras(p, profileId), review: opts.review, step: opts.step,
+    extras: preflightExtras(p, profileId), review: opts.review, step: opts.step, inputHashes: before,
   });
 }
 

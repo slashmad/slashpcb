@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 import type { BoardModel, Footprint, HighlightRequest, SchSymbol, SnapshotRequest } from "../shared/types";
 import { Annotations } from "./annotations";
-import type { KicadBridge } from "./kicad/bridge";
+import { sameFile, type KicadBridge } from "./kicad/bridge";
 import { summarizeReport } from "./kicad/checks";
 import { compareWithFolder, compareWithGit, diffText } from "./kicad/compare";
 import { partsText } from "./kicad/partnotes";
@@ -281,8 +281,9 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
     if (!br) throw new Error("The KiCad live link is off. Ask the user to turn it on (top bar: KiCad live).");
     const st = await br.request("status");
     if (!st.connected) throw new Error(`KiCad is not reachable through its IPC API (${st.error ?? "not running"}). Ask the user to open the board in KiCad's PCB editor with the API server enabled.`);
-    const pcb = p.info.pcb;
-    if (!pcb || !(st.boards ?? []).some((b: string) => b.split(/[\\/]/).pop() === pcb)) throw new Error(`KiCad's PCB editor does not have ${pcb ?? "this project's board"} open (open: ${(st.boards ?? []).join(", ") || "none"}).`);
+    // The exact file, never a same-named board of another revision; the bridge re-checks it before every command.
+    const pcb = p.info.pcb ? p.abs(p.info.pcb) : null;
+    if (!pcb || !(st.boards ?? []).some((b: string) => sameFile(b, pcb))) throw new Error(`KiCad's PCB editor does not have ${pcb ?? "this project's board"} open (open: ${(st.boards ?? []).join(", ") || "none"}). A board with the same name in another folder is a different revision.`);
     return { p, br, pcb };
   };
   const notFrozen = (p: KicadProject) => { if (p.info.frozen) throw new Error(`The project is frozen (${p.info.frozenReason}). Propose a new derivative instead.`); };
@@ -295,7 +296,7 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
       const br = ctx.bridge();
       if (!br) return text("Live link is off (the user can turn it on in the top bar).");
       const st = await br.request("status").catch((e: any) => ({ connected: false, error: e.message }));
-      const match = (st.boards ?? []).some((b: string) => b.split(/[\\/]/).pop() === p.info.pcb);
+      const match = !!p.info.pcb && (st.boards ?? []).some((b: string) => sameFile(b, p.abs(p.info.pcb!)));
       return text(st.connected ? `Connected to KiCad ${st.version ?? ""}. Open boards: ${(st.boards ?? []).join(", ") || "none"}. This project's board ${match ? "IS" : "is NOT"} open.` : `Not connected: ${st.error ?? "KiCad not running"}`);
     },
   });
@@ -409,7 +410,8 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
     inputSchema: { type: "object", properties: {} },
     async run() {
       const p = need();
-      const { file, data } = p.rulesData();
+      const { file, data, error } = p.rulesData();
+      if (error) return text(`The rules file ${file} is INVALID and blocks release packages: ${error}. Ask the user to fix it; it is never overwritten.`, true);
       if (!data.rules.length) return text(`No design invariants yet. They would be stored in ${p.rulesWritePath()}.`);
       const rep = p.design.rules;
       const lines = [`${data.rules.length} rule(s) in ${file}; ${rep ? `${rep.errors} error(s), ${rep.warnings} warning(s)` : "not evaluated yet"}`];
@@ -422,7 +424,7 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
   });
 
   hub.register("add_rule", {
-    description: "Add a design invariant (asks the user). Kinds: pin_net {pins:'D*.1', net:'COL*' or '!GND'}, pin_unconnected {pins:'U8.5'}, footprint {refs:'U1', footprint:'Lib:Name*'}, land_pattern {refs:'U3', reference:'Lib:Name' or a .kicad_mod path} (pad positions AND numbering must match a trusted land pattern; catches reversed or mirrored pin order), layer_nets {layer:'In2.Cu', nets:'GND'}, locked {refs:'SW*'} (snapshots current positions), part_present {refs:'U1 J1'}, rules_floor {} (snapshots current design rules; later relaxations fail). Globs use * and ?. Prefer narrow patterns (e.g. 'D0? D1?' rather than 'D*' when other diodes exist).",
+    description: "Add a design invariant (asks the user). Kinds: pin_net {pins:'D*.1', net:'COL*' or '!GND'}, pin_unconnected {pins:'U8.5'}, footprint {refs:'U1', footprint:'Lib:Name*'}, land_pattern {refs:'U3', reference:'Lib:Name' or a .kicad_mod path} (every pad must correspond exactly to a trusted land pattern: position, number, size, shape, type and drill; catches reversed or mirrored pin order, missing pads and changed pad sizes), layer_nets {layer:'In2.Cu', nets:'GND'}, locked {refs:'SW*'} (snapshots current positions), part_present {refs:'U1 J1'}, rules_floor {} (snapshots current design rules; later relaxations fail). Globs use * and ?. Prefer narrow patterns (e.g. 'D0? D1?' rather than 'D*' when other diodes exist).",
     inputSchema: { type: "object", properties: {
       kind: { type: "string", enum: ["pin_net", "pin_unconnected", "footprint", "land_pattern", "layer_nets", "locked", "part_present", "rules_floor"] },
       pins: { type: "string" }, net: { type: "string" }, refs: { type: "string" }, footprint: { type: "string" }, reference: { type: "string", description: "land_pattern: trusted Lib:Name or path to a .kicad_mod (e.g. the maker's land pattern)" }, layer: { type: "string" }, nets: { type: "string" },
@@ -430,7 +432,9 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
     }, required: ["kind"] },
     async run(a) {
       const p = need();
-      const rule = p.addRule({ kind: a.kind, pins: a.pins, net: a.net, refs: a.refs, footprint: a.footprint, reference: a.reference, layer: a.layer, nets: a.nets, tolerance: a.tolerance, severity: a.severity, note: a.note } as Rule);
+      let rule: Rule;
+      try { rule = p.addRule({ kind: a.kind, pins: a.pins, net: a.net, refs: a.refs, footprint: a.footprint, reference: a.reference, layer: a.layer, nets: a.nets, tolerance: a.tolerance, severity: a.severity, note: a.note } as Rule); }
+      catch (e: any) { return text(e?.message ?? String(e), true); }
       p.refreshRules();
       const v = p.design.rules?.violations.filter((x) => x.type.startsWith(`${rule.id}:`)) ?? [];
       return text(`Added ${rule.id}: ${describeRule(rule)} → ${v.length ? `currently VIOLATED: ${v.map((x) => x.description).join("; ")}` : "holds now"}. Stored in ${p.rulesData().file}.`);
@@ -441,7 +445,11 @@ export function registerTools(hub: McpHub, ctx: ToolContext): void {
   hub.register("remove_rule", {
     description: "Remove a design invariant by id (asks the user).",
     inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
-    async run(a) { const p = need(); const ok = p.removeRule(String(a.id)); p.refreshRules(); return text(ok ? `Removed ${a.id}.` : `No rule ${a.id}.`, !ok); },
+    async run(a) {
+      const p = need();
+      try { const ok = p.removeRule(String(a.id)); p.refreshRules(); return text(ok ? `Removed ${a.id}${p.info.frozen || !p.info.writable ? " (from SlashPCB's copy; the frozen project is unchanged)" : ""}.` : `No rule ${a.id}.`, !ok); }
+      catch (e: any) { return text(e?.message ?? String(e), true); }
+    },
   });
 
   hub.register("polarity_review", {

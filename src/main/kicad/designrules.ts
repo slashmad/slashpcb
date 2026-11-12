@@ -56,15 +56,19 @@ export function loadDesignRules(proPath: string, druPath: string): DesignRules {
   return readDesignRules(existsSync(proPath) ? readFileSync(proPath, "utf8") : null, existsSync(druPath) ? readFileSync(druPath, "utf8") : null);
 }
 
-export interface RuleChange { kind: "relaxed" | "tightened" | "ignored" | "unignored" | "exclusion+" | "exclusion-" | "class" | "custom+" | "custom-" | "custom~"; what: string; from?: string; to?: string }
+export interface RuleChange { kind: "relaxed" | "tightened" | "removed" | "added" | "ignored" | "unignored" | "exclusion+" | "exclusion-" | "class" | "class+" | "class-" | "custom+" | "custom-" | "custom~"; what: string; from?: string; to?: string }
 
 /** Differences from `old` to `cur`; relaxations first. */
 export function diffDesignRules(old: DesignRules, cur: DesignRules): RuleChange[] {
   const out: RuleChange[] = [];
   for (const k of MINIMUMS) {
     const a = old.rules[k], b = cur.rules[k];
-    if (typeof a !== "number" || typeof b !== "number" || Math.abs(a - b) < 1e-9) continue;
-    out.push({ kind: b < a ? "relaxed" : "tightened", what: k, from: String(a), to: String(b) });
+    const na = typeof a === "number", nb = typeof b === "number";
+    // A removed minimum falls back to a default SlashPCB cannot resolve: never "unchanged".
+    if (na && !nb) { out.push({ kind: "removed", what: k, from: String(a), to: b === undefined ? "(removed: KiCad default applies)" : String(b) }); continue; }
+    if (!na && nb) { out.push({ kind: "added", what: k, from: a === undefined ? "(default)" : String(a), to: String(b) }); continue; }
+    if (!na || !nb || Math.abs((a as number) - (b as number)) < 1e-9) continue;
+    out.push({ kind: (b as number) < (a as number) ? "relaxed" : "tightened", what: k, from: String(a), to: String(b) });
   }
   for (const k of cur.ignored) if (!old.ignored.includes(k)) out.push({ kind: "ignored", what: k, from: old.severities[k] ?? "default", to: "ignore" });
   for (const k of old.ignored) if (!cur.ignored.includes(k)) out.push({ kind: "unignored", what: k, from: "ignore", to: cur.severities[k] ?? "default" });
@@ -72,23 +76,26 @@ export function diffDesignRules(old: DesignRules, cur: DesignRules): RuleChange[
   for (const e of old.exclusions) if (!cur.exclusions.includes(e)) out.push({ kind: "exclusion-", what: e.slice(0, 160) });
   for (const c of cur.classes) {
     const o = old.classes.find((x) => x.name === c.name);
-    if (!o) continue;
+    if (!o) { out.push({ kind: "class+", what: `net class ${c.name}` }); continue; }
     for (const k of ["clearance", "track_width", "via_diameter", "via_drill", "diff_pair_gap"] as const) {
       const a = o[k], b = c[k];
       if (typeof a === "number" && typeof b === "number" && Math.abs(a - b) > 1e-9) out.push({ kind: b < a ? "relaxed" : "tightened", what: `net class ${c.name}.${k}`, from: String(a), to: String(b) });
+      else if (typeof a === "number" && typeof b !== "number") out.push({ kind: "removed", what: `net class ${c.name}.${k}`, from: String(a), to: "(removed: inherits Default)" });
     }
   }
+  // A removed class moves its nets to Default (or another class): their effective rules may be weaker.
+  for (const o of old.classes) if (!cur.classes.some((c) => c.name === o.name)) out.push({ kind: "class-", what: `net class ${o.name}`, from: [o.clearance !== undefined && `clearance ${o.clearance}`, o.track_width !== undefined && `track ${o.track_width}`].filter(Boolean).join(", ") || "defined", to: "(removed: its nets fall back to another class)" });
   for (const c of cur.custom) {
     const o = old.custom.find((x) => x.name === c.name);
     if (!o) out.push({ kind: "custom+", what: c.name, to: c.constraints.join(" ") });
     else if (o.text !== c.text) out.push({ kind: "custom~", what: c.name, from: `${o.condition} ${o.constraints.join(" ")}`, to: `${c.condition} ${c.constraints.join(" ")}` });
   }
   for (const o of old.custom) if (!cur.custom.some((c) => c.name === o.name)) out.push({ kind: "custom-", what: o.name, from: o.constraints.join(" ") });
-  const rank = (k: RuleChange["kind"]) => ["relaxed", "ignored", "exclusion+", "custom+", "custom~", "custom-", "class", "tightened", "unignored", "exclusion-"].indexOf(k);
+  const rank = (k: RuleChange["kind"]) => ["relaxed", "removed", "class-", "ignored", "exclusion+", "custom+", "custom~", "custom-", "class", "class+", "added", "tightened", "unignored", "exclusion-"].indexOf(k);
   return out.sort((a, b) => rank(a.kind) - rank(b.kind));
 }
 
-export const isRelaxation = (c: RuleChange) => c.kind === "relaxed" || c.kind === "ignored" || c.kind === "exclusion+" || c.kind === "custom+" || c.kind === "custom~" || c.kind === "custom-";
+export const isRelaxation = (c: RuleChange) => c.kind === "relaxed" || c.kind === "removed" || c.kind === "class-" || c.kind === "ignored" || c.kind === "exclusion+" || c.kind === "custom+" || c.kind === "custom~" || c.kind === "custom-";
 
 export function rulesText(changes: RuleChange[]): string {
   if (!changes.length) return "Design rules: unchanged.";

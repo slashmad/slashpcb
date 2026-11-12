@@ -22,6 +22,9 @@ export interface BoardDiff {
   footprint: Change[];
   fields: (Change & { field: string })[];
   padNets: (Change & { pad: string })[];
+  attrs: Change[]; // assembly attributes: dnp, exclude_from_bom, exclude_from_pos_files, board_only, smd/through_hole
+  pads: { ref: string; pad: string; change: "added" | "removed" | "geometry"; detail: string }[];
+  board: string[]; // outline, keepouts, stackup/finish/mask, layer count: what changed
   netsAdded: string[];
   netsRemoved: string[];
   before: { size: [number, number]; copper: number; footprints: number; tracks: number; vias: number; trackLengthMm: number; zones: number };
@@ -40,7 +43,7 @@ function summary(b: BoardModel) {
 export function diffBoards(old: BoardModel, cur: BoardModel): BoardDiff {
   const byRef = (b: BoardModel) => { const m = new Map<string, Footprint>(); for (const f of b.footprints) if (f.ref && !m.has(f.ref)) m.set(f.ref, f); return m; };
   const A = byRef(old), B = byRef(cur);
-  const d: BoardDiff = { added: [], removed: [], moved: [], rotated: [], flipped: [], value: [], footprint: [], fields: [], padNets: [], netsAdded: [], netsRemoved: [], before: summary(old), after: summary(cur) };
+  const d: BoardDiff = { added: [], removed: [], moved: [], rotated: [], flipped: [], value: [], footprint: [], fields: [], padNets: [], attrs: [], pads: [], board: [], netsAdded: [], netsRemoved: [], before: summary(old), after: summary(cur) };
   for (const [ref, f] of A) if (!B.has(ref)) d.removed.push({ ref, x: f.x, y: f.y, bbox: f.bbox });
   for (const [ref, f] of B) {
     const o = A.get(ref);
@@ -62,13 +65,60 @@ export function diffBoards(old: BoardModel, cur: BoardModel): BoardDiff {
       const was = oldPads.get(p.num);
       if (was !== undefined && was !== p.net) d.padNets.push({ ref, pad: p.num, from: was, to: p.net });
     }
+    const at = (x: Footprint) => x.attrs.filter((a) => ASSEMBLY_ATTRS.has(a)).sort().join(" ") || "–";
+    if (at(o) !== at(f)) d.attrs.push({ ref, from: at(o), to: at(f) });
+    d.pads.push(...padChanges(ref, o, f));
   }
+  d.board = boardChanges(old, cur);
   const nA = new Set(old.nets), nB = new Set(cur.nets);
   d.netsAdded = cur.nets.filter((n) => !nA.has(n));
   d.netsRemoved = old.nets.filter((n) => !nB.has(n));
   d.added.sort(natural); d.removed.sort((a, b) => natural(a.ref, b.ref)); d.moved.sort((a, b) => natural(a.ref, b.ref));
   return d;
 }
+
+const ASSEMBLY_ATTRS = new Set(["dnp", "exclude_from_bom", "exclude_from_pos_files", "board_only", "smd", "through_hole", "allow_missing_courtyard", "allow_soldermask_bridges"]);
+const q = (v: number | undefined) => (v === undefined ? "–" : String(+v.toFixed(4)));
+
+/** Pads as a multiset per number (duplicates kept), in footprint-local coordinates, with geometry. */
+function padSig(f: Footprint): Map<string, string[]> {
+  const a = (-f.rot * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+  const m = new Map<string, string[]>();
+  for (const p of f.pads) {
+    const dx = p.x - f.x, dy = p.y - f.y;
+    const lx = c * dx - s * dy, ly = s * dx + c * dy;
+    const sig = `at ${q(lx)},${q(ly)} ${q(p.w)}×${q(p.h)} ${p.shape} ${p.type}${p.drill ? ` drill ${q(p.drill)}${p.drillMin && p.drillMin !== p.drill ? `×${q(p.drillMin)}` : ""}` : ""} rot ${q((((p.rot - f.rot) % 360) + 360) % 360)} [${[...p.layers].sort().join(",")}]${p.maskMargin !== undefined ? ` mask ${q(p.maskMargin)}` : ""}`;
+    m.set(p.num, [...(m.get(p.num) ?? []), sig]);
+  }
+  for (const v of m.values()) v.sort();
+  return m;
+}
+function padChanges(ref: string, o: Footprint, f: Footprint): BoardDiff["pads"] {
+  const A = padSig(o), B = padSig(f), out: BoardDiff["pads"] = [];
+  for (const [num, sigs] of A) if (!B.has(num)) out.push({ ref, pad: num || "(unnumbered)", change: "removed", detail: sigs.join("; ") });
+  for (const [num, sigs] of B) {
+    const was = A.get(num);
+    if (!was) { out.push({ ref, pad: num || "(unnumbered)", change: "added", detail: sigs.join("; ") }); continue; }
+    if (was.join("|") !== sigs.join("|")) out.push({ ref, pad: num || "(unnumbered)", change: "geometry", detail: `${was.join("; ")} → ${sigs.join("; ")}` });
+  }
+  return out;
+}
+/** Board-level differences outside footprints: outline, keepouts, stackup, layer count. */
+function boardChanges(old: BoardModel, cur: BoardModel): string[] {
+  const out: string[] = [];
+  const edge = (b: BoardModel) => JSON.stringify(b.graphics.filter((g) => g.layer === "Edge.Cuts").map((g) => [g.kind, (g.pts ?? []).map((v) => +v.toFixed(4)), g.cx, g.cy, g.r]).sort());
+  if (edge(old) !== edge(cur)) out.push("board outline (Edge.Cuts) changed");
+  const keep = (b: BoardModel) => JSON.stringify(b.zones.filter((z) => z.keepout).map((z) => [z.layers, (z.outline ?? []).map((v) => +v.toFixed(4))]).sort());
+  if (keep(old) !== keep(cur)) out.push(`keepout areas changed (${old.zones.filter((z) => z.keepout).length} → ${cur.zones.filter((z) => z.keepout).length})`);
+  if (JSON.stringify(old.stackup ?? null) !== JSON.stringify(cur.stackup ?? null)) out.push("stackup, finish, mask/silk colours or tenting changed");
+  if (JSON.stringify(old.mask ?? null) !== JSON.stringify(cur.mask ?? null)) out.push("board mask settings changed");
+  if (old.thickness !== cur.thickness) out.push(`board thickness ${old.thickness ?? "?"} → ${cur.thickness ?? "?"} mm`);
+  if (old.copper.join() !== cur.copper.join()) out.push(`copper layers ${old.copper.join("/")} → ${cur.copper.join("/")}`);
+  return out;
+}
+
+/** What the semantic comparison does not cover (a native-file diff is needed for these). */
+export const NOT_COMPARED = "3D models and their transforms, silkscreen/fab graphics and texts, zone fills and zone settings other than keepouts, track widths per segment, custom-pad outlines";
 
 export function diffSchematics(old: SchematicModel, cur: SchematicModel): SchDiff {
   const byRef = (s: SchematicModel) => { const m = new Map<string, SchematicModel["symbols"][number]>(); for (const x of s.symbols) if (!x.power && !m.has(x.ref)) m.set(x.ref, x); return m; };
@@ -137,6 +187,9 @@ export function diffText(d: RevisionDiff, max = 40): string {
     list("Footprint", b.footprint, (c) => `${c.ref} ${c.from}→${c.to}`);
     list("Fields", b.fields, (c) => `${c.ref}.${c.field} "${c.from}"→"${c.to}"`);
     list("Pad nets", b.padNets, (c) => `${c.ref}.${c.pad} ${c.from || "–"}→${c.to || "–"}`);
+    list("Assembly attributes", b.attrs, (c) => `${c.ref} ${c.from} → ${c.to}`);
+    list("Pads", b.pads, (c) => `${c.ref}.${c.pad} ${c.change}: ${c.detail}`);
+    list("Board", b.board, (x) => x);
     list("Nets added", b.netsAdded, (n) => n);
     list("Nets removed", b.netsRemoved, (n) => n);
   } else L.push("Board: not compared (missing on one side).");
@@ -150,6 +203,7 @@ export function diffText(d: RevisionDiff, max = 40): string {
     list("Symbol fields", s.fields, (c) => `${c.ref}.${c.field} "${c.from}"→"${c.to}"`);
   }
   if (d.rules) L.push(rulesText(d.rules));
+  L.push(`Not compared: ${NOT_COMPARED}. "No change" above does not certify those.`);
   if (d.metrics) L.push(metricsText(d.metrics.after, d.metrics.before));
   return L.join("\n");
 }

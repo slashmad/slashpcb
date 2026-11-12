@@ -95,35 +95,80 @@ export interface EditResult { file: string; changed: number; inserted: number; m
  * kind decides the format of inserted properties. An empty value on a missing field is a no-op.
  */
 export function setFields(file: string, kind: "sch" | "pcb", edits: FieldEdit[], at?: (uuid: string) => [number, number]): EditResult {
-  let text = readFileSync(file, "utf8");
+  const original = readFileSync(file, "utf8");
+  let text = original;
   const nl = text.includes("\r\n") ? "\r\n" : "\n";
-  const spans = topLevelSpans(text).filter((s) => s.head === (kind === "sch" ? "symbol" : "footprint"));
+  const head = kind === "sch" ? "symbol" : "footprint";
+  const spans = topLevelSpans(text).filter((s) => s.head === head);
   const res: EditResult = { file, changed: 0, inserted: 0, missing: [] };
-  // Apply from the end of the file so earlier offsets stay valid.
-  const jobs = edits.map((e) => ({ e, span: spans.find((s) => text.slice(s.start, s.end).includes(`(uuid ${quote(e.uuid)})`)) }));
-  for (const j of jobs) if (!j.span) res.missing.push(j.e.uuid);
-  const valid = jobs.filter((j) => j.span).sort((a, b) => b.span!.start - a.span!.start || 0);
-  for (const { e, span } of valid) {
-    const item = text.slice(span!.start, span!.end);
-    const prop = findProperty(item, e.field);
-    let next: string;
-    if (prop) {
-      if (item.slice(prop.valStart, prop.valEnd) === quote(e.value)) continue;
-      next = item.slice(0, prop.valStart) + quote(e.value) + item.slice(prop.valEnd);
-      res.changed++;
-    } else {
-      if (!e.value) continue;
-      const [x, y] = at?.(e.uuid) ?? [0, 0];
-      const t = (n: number) => "\t".repeat(n);
-      const block = kind === "sch"
-        ? [`${t(2)}(property ${quote(e.field)} ${quote(e.value)}`, `${t(3)}(at ${x} ${y} 0)`, `${t(3)}(hide yes)`, `${t(3)}(effects`, `${t(4)}(font`, `${t(5)}(size 1.27 1.27)`, `${t(4)})`, `${t(3)})`, `${t(2)})`]
-        : [`${t(2)}(property ${quote(e.field)} ${quote(e.value)}`, `${t(3)}(at 0 0 0)`, `${t(3)}(unlocked yes)`, `${t(3)}(layer "F.Fab")`, `${t(3)}(hide yes)`, `${t(3)}(uuid ${quote(randomUUID())})`, `${t(3)}(effects`, `${t(4)}(font`, `${t(5)}(size 1 1)`, `${t(5)}(thickness 0.15)`, `${t(4)})`, `${t(3)})`, `${t(2)})`];
-      const ip = insertPoint(item);
-      next = item.slice(0, ip) + nl + block.join(nl) + item.slice(ip);
-      res.inserted++;
-    }
-    text = text.slice(0, span!.start) + next + text.slice(span!.end);
+  // Group by item: every edit of one item is applied to that item's text in sequence (offsets are
+  // recomputed after each edit), then the item is replaced once. Items are replaced from the end of
+  // the file so earlier offsets stay valid.
+  const byUuid = new Map<string, FieldEdit[]>();
+  for (const e of edits) byUuid.set(e.uuid, [...(byUuid.get(e.uuid) ?? []), e]);
+  const jobs: { span: { start: number; end: number }; edits: FieldEdit[] }[] = [];
+  for (const [uuid, list] of byUuid) {
+    const hits = spans.filter((s) => text.slice(s.start, s.end).includes(`(uuid ${quote(uuid)})`));
+    if (hits.length !== 1) { res.missing.push(hits.length ? `${uuid} (ambiguous: ${hits.length} items)` : uuid); continue; }
+    jobs.push({ span: hits[0], edits: list });
   }
-  if (res.changed || res.inserted) atomicWrite(file, text);
+  jobs.sort((a, b) => b.span.start - a.span.start);
+  for (const { span, edits: list } of jobs) {
+    let item = text.slice(span.start, span.end);
+    for (const e of list) {
+      const prop = findProperty(item, e.field);
+      if (prop) {
+        if (item.slice(prop.valStart, prop.valEnd) === quote(e.value)) continue;
+        item = item.slice(0, prop.valStart) + quote(e.value) + item.slice(prop.valEnd);
+        res.changed++;
+      } else {
+        if (!e.value) continue;
+        const [x, y] = at?.(e.uuid) ?? [0, 0];
+        const t = (n: number) => "\t".repeat(n);
+        const block = kind === "sch"
+          ? [`${t(2)}(property ${quote(e.field)} ${quote(e.value)}`, `${t(3)}(at ${x} ${y} 0)`, `${t(3)}(hide yes)`, `${t(3)}(effects`, `${t(4)}(font`, `${t(5)}(size 1.27 1.27)`, `${t(4)})`, `${t(3)})`, `${t(2)})`]
+          : [`${t(2)}(property ${quote(e.field)} ${quote(e.value)}`, `${t(3)}(at 0 0 0)`, `${t(3)}(unlocked yes)`, `${t(3)}(layer "F.Fab")`, `${t(3)}(hide yes)`, `${t(3)}(uuid ${quote(randomUUID())})`, `${t(3)}(effects`, `${t(4)}(font`, `${t(5)}(size 1 1)`, `${t(5)}(thickness 0.15)`, `${t(4)})`, `${t(3)})`, `${t(2)})`];
+        const ip = insertPoint(item);
+        item = item.slice(0, ip) + nl + block.join(nl) + item.slice(ip);
+        res.inserted++;
+      }
+    }
+    text = text.slice(0, span.start) + item + text.slice(span.end);
+  }
+  if (!res.changed && !res.inserted) return res;
+  verifyEdit(original, text, head, jobs.map((j) => j.edits).flat());
+  atomicWrite(file, text);
   return res;
+}
+
+/**
+ * Structural check before anything is written: the same top-level items in the same order, each
+ * edited item still carries its UUID as a direct child, and every requested field reads back with
+ * the requested value as a direct-child property. Throws instead of writing a damaged file.
+ */
+function verifyEdit(before: string, after: string, head: string, edits: FieldEdit[]): void {
+  const a = topLevelSpans(before), b = topLevelSpans(after);
+  if (a.length !== b.length || a.some((s, i) => s.head !== b[i].head)) throw new Error("edit check failed: the file's top-level structure changed");
+  const items = b.filter((s) => s.head === head);
+  for (const e of edits) {
+    const it = items.map((s) => after.slice(s.start, s.end)).filter((t) => directChildUuid(t) === e.uuid);
+    if (it.length !== 1) throw new Error(`edit check failed: item ${e.uuid} lost its UUID`);
+    const prop = findProperty(it[0], e.field);
+    if (!e.value && !prop) continue;
+    if (!prop || it[0].slice(prop.valStart, prop.valEnd) !== quote(e.value)) throw new Error(`edit check failed: ${e.field} of ${e.uuid} does not read back`);
+  }
+}
+
+/** The (uuid "…") that is a direct child of an item (not of a nested pin/property). */
+function directChildUuid(item: string): string | null {
+  let depth = 0;
+  for (let i = 0; i < item.length; i++) {
+    const c = item.charCodeAt(i);
+    if (c === 34) { i++; while (i < item.length && item.charCodeAt(i) !== 34) { if (item.charCodeAt(i) === 92) i++; i++; } continue; }
+    if (c === 40) {
+      depth++;
+      if (depth === 2 && item.startsWith("(uuid ", i)) { const m = /^\(uuid "?([^")\s]+)"?\)/.exec(item.slice(i, i + 60)); if (m) return m[1]; }
+    } else if (c === 41) depth--;
+  }
+  return null;
 }

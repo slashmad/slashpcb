@@ -13,7 +13,9 @@ export interface PolarityEntry {
   kind: PartKind; pins: PolarityPin[]; pad1?: [number, number];
   issues: { level: "error" | "warning" | "info"; text: string }[];
   fingerprint: string;
+  identity: Record<string, string>; // hash per reviewed aspect; the fingerprint covers all of them
   verified?: string; // ISO time when the user verified this exact fingerprint
+  stale?: string[]; // aspects that changed since an earlier verification (the tick no longer applies)
   library?: FootprintCompare; // comparison with the footprint's own library version
 }
 
@@ -37,9 +39,28 @@ function classify(f: Footprint): PartKind | null {
   return pads >= 3 ? "other" : null;
 }
 
-const fp = (f: Footprint) => createHash("sha1").update(JSON.stringify([f.lib, f.side, +f.x.toFixed(3), +f.y.toFixed(3), +f.rot.toFixed(2), f.pads.map((p) => [p.num, p.net, +p.x.toFixed(3), +p.y.toFixed(3)])])).digest("hex").slice(0, 16);
+const h = (v: unknown) => createHash("sha1").update(JSON.stringify(v)).digest("hex").slice(0, 12);
+const r3 = (v: number | undefined) => (v === undefined ? null : +v.toFixed(3));
+const PART_FIELDS = /^(mpn|manufacturer|mfr|lcsc|part.?number|manufacturer.part.number|mfr.?pn|jlcpcb.part.#?)$/i;
 
-export function polarityReview(b: BoardModel | null, verified: Record<string, { fingerprint: string; at: string }> = {}, sch: SchematicModel | null = null,
+/** What a human verified, aspect by aspect: a change to any of them clears the tick. */
+export const IDENTITY_LABELS: Record<string, string> = {
+  part: "part (value, footprint, MPN/manufacturer fields)", placement: "side, position or rotation", pads: "pad numbers, nets, positions, sizes, shapes or drills",
+  pins: "schematic pin names", reference: "library footprint version",
+};
+function identityOf(f: Footprint, pins: PolarityPin[], reference: unknown): Record<string, string> {
+  return {
+    part: h([f.lib, f.value, Object.entries(f.fields).filter(([k]) => PART_FIELDS.test(k)).sort()]),
+    placement: h([f.side, r3(f.x), r3(f.y), +f.rot.toFixed(2)]),
+    pads: h(f.pads.map((p) => [p.num, p.net, r3(p.x), r3(p.y), r3(p.w), r3(p.h), +p.rot.toFixed(2), p.shape, p.type, r3(p.drill), r3(p.drillMin)])),
+    pins: h(pins.map((p) => [p.num, p.name])),
+    reference: h(reference ?? null),
+  };
+}
+
+export interface PolarityVerification { fingerprint: string; at: string; identity?: Record<string, string> }
+
+export function polarityReview(b: BoardModel | null, verified: Record<string, PolarityVerification> = {}, sch: SchematicModel | null = null,
   libs?: { map: Map<string, string>; projectDir: string }): PolarityEntry[] {
   if (!b) return [];
   const out: PolarityEntry[] = [];
@@ -85,9 +106,11 @@ export function polarityReview(b: BoardModel | null, verified: Record<string, { 
     // Compare with the library version of this footprint (catches reversed numbering / unflipped copies
     // when the library is right; a wrong library needs a land_pattern rule with a trusted reference).
     let library: FootprintCompare | undefined;
+    let refPads: unknown = null;
     if (libs) {
       const ref = loadReference(f.lib, libs.map, libs.projectDir);
       if (ref) {
+        refPads = ref.pads;
         library = compareWithReference(f, ref.pads);
         if (library.status === "numbering") issues.push({ level: "error", text: `pad numbering differs from library ${f.lib}: ${library.swaps?.slice(0, 3).join("; ")}` });
         else if (library.status === "unflipped") issues.push({ level: "error", text: `bottom-side copy is not mirrored relative to library ${f.lib}` });
@@ -95,11 +118,15 @@ export function polarityReview(b: BoardModel | null, verified: Record<string, { 
       }
     }
     const p1 = f.pads.find((p) => p.num === "1" || p.num === "A1");
-    const print = fp(f);
+    const identity = identityOf(f, pins, refPads);
+    const print = h(identity);
     const v = verified[f.ref];
+    const stale = v && v.fingerprint !== print
+      ? (v.identity ? Object.keys(IDENTITY_LABELS).filter((k) => v.identity![k] !== identity[k]).map((k) => IDENTITY_LABELS[k]) : ["verified with an earlier SlashPCB version: review again"])
+      : undefined;
     out.push({
       ref: f.ref, value: f.value, lib: f.lib, side: f.side, x: f.x, y: f.y, rot: f.rot, kind, pins, pad1: p1 ? [p1.x, p1.y] : undefined, issues,
-      fingerprint: print, verified: v && v.fingerprint === print ? v.at : undefined, library,
+      fingerprint: print, identity, verified: v && v.fingerprint === print ? v.at : undefined, stale: stale?.length ? stale : undefined, library,
     });
   }
   const order: PartKind[] = ["ic", "transistor", "diode", "led", "polarized-cap", "connector", "battery", "crystal", "other"];
@@ -112,7 +139,7 @@ export function polarityText(list: PolarityEntry[], onlyIssues = false): string 
   const lines = [`Polarity review: ${list.length} polarized/multi-pin parts, ${list.filter((e) => e.verified).length} verified by the user, ${errors} contradiction(s).`];
   for (const e of rows.slice(0, 200)) {
     const pins = e.pins.slice(0, 12).map((p) => `${p.num}${p.name ? `(${p.name})` : ""}=${p.net || "–"}`).join(" ");
-    lines.push(`${e.ref} ${e.kind} ${e.value} [${e.lib}] ${e.side === "B" ? "bottom" : "top"} ${e.rot}° ${e.verified ? "VERIFIED" : "unverified"}: ${pins}${e.pins.length > 12 ? " …" : ""}`);
+    lines.push(`${e.ref} ${e.kind} ${e.value} [${e.lib}] ${e.side === "B" ? "bottom" : "top"} ${e.rot}° ${e.verified ? "VERIFIED" : e.stale ? `VERIFICATION STALE (changed: ${e.stale.join(", ")})` : "unverified"}: ${pins}${e.pins.length > 12 ? " …" : ""}`);
     for (const i of e.issues) lines.push(`   ${i.level.toUpperCase()}: ${i.text}`);
   }
   return lines.join("\n");

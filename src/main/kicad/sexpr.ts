@@ -148,9 +148,17 @@ export function arcPoints(s: [number, number], m: [number, number], e: [number, 
   let sweep = norm(a1 - a0);
   if (norm(am - a0) > sweep) sweep -= 2 * Math.PI;
   const steps = Math.max(4, Math.min(96, Math.ceil(Math.abs(sweep) * r / maxSeg)));
+  // Sample angles plus the arc's axis extremes (0°, 90°, 180°, 270° inside the sweep), so extents are exact.
+  const ts: number[] = [];
+  for (let k = 0; k <= steps; k++) ts.push(k / steps);
+  for (let q = -8; q <= 8; q++) {
+    const t = (q * Math.PI / 2 - a0) / sweep;
+    if (t > 1e-9 && t < 1 - 1e-9) ts.push(t);
+  }
+  ts.sort((x, y) => x - y);
   const out: number[] = [];
-  for (let k = 0; k <= steps; k++) {
-    const a = a0 + (sweep * k) / steps;
+  for (const t of ts) {
+    const a = a0 + sweep * t;
     out.push(ux + r * Math.cos(a), uy + r * Math.sin(a));
   }
   return out;

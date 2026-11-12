@@ -50,6 +50,7 @@ export interface Shape {
   pts?: number[]; // line: polyline, poly: closed outline
   cx?: number; cy?: number; r?: number; // circle
   text?: string; x?: number; y?: number; size?: number; angle?: number; mirror?: boolean; // text
+  net?: string; // board copper graphics that belong to a net
 }
 
 export interface Pad {
@@ -62,6 +63,7 @@ export interface Pad {
   net: string;
   drill?: number; // round drill diameter or the larger slot size
   drillMin?: number; // smaller slot size (= drill for round holes)
+  hole?: [number, number]; // absolute hole centre when the drill has an offset from the pad centre
   polys?: number[][]; // absolute outlines (all shapes except circle; custom pads may have several)
   r?: number; // circle radius
   pinFunction?: string;

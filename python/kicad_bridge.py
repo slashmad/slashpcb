@@ -25,6 +25,7 @@ def emit(obj):
 
 try:
     from kipy import KiCad
+    from kipy.board import Board
     from kipy.board_types import FootprintInstance, Pad, Track, ArcTrack, Via, Zone
     from kipy.geometry import Angle, Vector2
     from kipy.proto.common.types import base_types_pb2
@@ -60,19 +61,45 @@ class Bridge:
             self.version = None
         return k
 
-    def boards(self):
-        k = self.connect()
-        docs = k.get_open_documents(base_types_pb2.DocumentType.DOCTYPE_PCB)
-        return [d.board_filename for d in docs]
+    @staticmethod
+    def canon(path):
+        """Canonical absolute path for identity checks (symlinks resolved, case folded on Windows)."""
+        p = os.path.realpath(os.path.abspath(path))
+        return os.path.normcase(p)
 
-    def board(self, want=None):
+    @staticmethod
+    def doc_path(d):
+        """Full path of an open PCB document: project folder + board file name ('' when unknown)."""
+        folder = getattr(getattr(d, "project", None), "path", "") or ""
+        name = d.board_filename or ""
+        if not folder or not name:
+            return ""
+        return os.path.join(folder, name) if not os.path.isabs(name) else name
+
+    def docs(self):
         k = self.connect()
-        b = k.get_board()
-        if want:
-            name = b.name or ""
-            if os.path.basename(name) != os.path.basename(want):
-                raise RuntimeError(f"KiCad has {name or 'another board'} open, not {os.path.basename(want)}")
-        return b
+        return k.get_open_documents(base_types_pb2.DocumentType.DOCTYPE_PCB)
+
+    def boards(self):
+        return [self.doc_path(d) or d.board_filename for d in self.docs()]
+
+    def board(self, want):
+        """The open board whose full path is `want`. Same file names in other folders never match;
+        an unknown document path or several matches are refused. Called before every command."""
+        if not want:
+            raise RuntimeError("no board path given; SlashPCB must name the exact board file")
+        target = self.canon(want)
+        docs = self.docs()
+        hits = [d for d in docs if self.doc_path(d) and self.canon(self.doc_path(d)) == target]
+        if len(hits) == 1:
+            return Board(self.kicad._client, hits[0])
+        if len(hits) > 1:
+            raise RuntimeError(f"{len(hits)} open KiCad documents resolve to {want}; refusing an ambiguous target")
+        unknown = [d.board_filename for d in docs if not self.doc_path(d)]
+        open_list = ", ".join(self.doc_path(d) or f"{d.board_filename} (folder unknown)" for d in docs) or "none"
+        if unknown:
+            raise RuntimeError(f"KiCad does not report the folder of {', '.join(unknown)}; cannot confirm it is {want} (open: {open_list})")
+        raise RuntimeError(f"KiCad has not opened {want} (open: {open_list})")
 
     def refresh_status(self):
         st = {"connected": False}
@@ -130,7 +157,7 @@ class Bridge:
         fps = self.footprints_by_ref(b, a.get("refs") or [])
         if fps:
             b.add_to_selection(fps)
-        self.last_sel = (tuple(sorted(a.get("refs") or [])), ())
+        self.last_sel = (self.doc_path(b.document), tuple(sorted(a.get("refs") or [])), ())
         return {"selected": len(fps)}
 
     def cmd_move(self, a):
@@ -200,12 +227,16 @@ class Bridge:
                     st = self.refresh_status()
                     if not st.get("connected") or not st.get("boards"):
                         continue
-                    b = self.kicad.get_board()
-                    sel = self.selection(b)
-                    key = (tuple(sel[0]), tuple(sel[1]))
-                    if key != self.last_sel:
-                        self.last_sel = key
-                        emit({"event": "selection", "board": b.name, "refs": sel[0], "nets": sel[1]})
+                    for d in self.docs():
+                        path = self.doc_path(d)
+                        if not path:
+                            continue
+                        b = Board(self.kicad._client, d)
+                        sel = self.selection(b)
+                        key = (path, tuple(sel[0]), tuple(sel[1]))
+                        if key != self.last_sel:
+                            self.last_sel = key
+                            emit({"event": "selection", "board": path, "refs": sel[0], "nets": sel[1]})
             except Exception:
                 self.kicad = None
 

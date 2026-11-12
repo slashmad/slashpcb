@@ -148,7 +148,9 @@ function pad(l: SList, fpX: Xf, copper: string[], netOf: (l: SList) => string): 
     if (nums.length) { drill = Math.max(...nums); drillMin = Math.min(...nums); }
   }
   const padX = placement(x, y, rot);
-  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, drillMin, pinFunction: str(l, "pinfunction"), maskMargin: num(l, "solder_mask_margin") };
+  const off = child(drillNode, "offset");
+  const hole = off && (Number(off[1]) || Number(off[2])) ? padX(Number(off[1]) || 0, Number(off[2]) || 0) as [number, number] : undefined;
+  const p: Pad = { num: numStr, type, shape: shp, x, y, rot, w, h, layers, net: netOf(l), drill, drillMin, pinFunction: str(l, "pinfunction"), maskMargin: num(l, "solder_mask_margin"), hole };
   if (shp === "circle") p.r = w / 2;
   else if (shp === "oval") p.polys = [mapPts(ovalPoly(w, h), padX)];
   else if (shp === "roundrect" || shp === "chamfered_rect") p.polys = [mapPts(rectPoly(w, h, (num(l, "roundrect_rratio") ?? 0.25) * Math.min(w, h)), padX)];
@@ -190,11 +192,13 @@ function grow(b: [number, number, number, number], x: number, y: number, m = 0):
   if (y + m > b[3]) b[3] = y + m;
 }
 
-function growShape(b: [number, number, number, number], s: Shape): void {
-  if (s.kind === "circle") { grow(b, s.cx!, s.cy!, s.r! + s.w / 2); return; }
+/** Extent of a shape; `stroke=false` uses the centre line (mechanical outlines: the cut follows the line centre). */
+function growShape(b: [number, number, number, number], s: Shape, stroke = true): void {
+  const half = stroke ? s.w / 2 : 0;
+  if (s.kind === "circle") { grow(b, s.cx!, s.cy!, s.r! + half); return; }
   if (s.kind === "text") { grow(b, s.x!, s.y!, (s.size ?? 1) / 2); return; }
   const p = s.pts ?? [];
-  for (let i = 0; i < p.length; i += 2) grow(b, p[i], p[i + 1], s.w / 2);
+  for (let i = 0; i < p.length; i += 2) grow(b, p[i], p[i + 1], half);
 }
 
 /** KiCad escapes some characters in net names on the board ("{slash}" for "/"). */
@@ -336,13 +340,16 @@ export function parseBoard(file: string, text?: string): BoardModel {
       if (z.net) nets.add(z.net);
     } else if (typeof h === "string" && h.startsWith("gr_")) {
       const s = shape(it, null);
-      if (s) graphics.push(s);
+      if (s) {
+        if (s.layer.endsWith(".Cu") && child(it, "net")) s.net = netOf(it);
+        graphics.push(s);
+      }
     }
   }
 
   // Board extent: Edge.Cuts when present, otherwise everything.
   const bbox = EMPTY();
-  for (const g of graphics) if (g.layer === "Edge.Cuts") growShape(bbox, g);
+  for (const g of graphics) if (g.layer === "Edge.Cuts" && g.kind !== "text") growShape(bbox, g, false);
   if (!Number.isFinite(bbox[0])) {
     for (const f of footprints) { grow(bbox, f.bbox[0], f.bbox[1]); grow(bbox, f.bbox[2], f.bbox[3]); }
     for (const t of tracks) { grow(bbox, t.x1, t.y1); grow(bbox, t.x2, t.y2); }

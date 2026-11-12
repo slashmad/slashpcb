@@ -4,14 +4,15 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { AgentEvent, AgentKind, DesignSnapshot, HighlightRequest, PermissionDecision, SnapshotRequest } from "../shared/types";
 import { AgentSession } from "./agents/base";
-import { claudeAuthStatus, claudeLogin, codexAuthStatus, codexLogin, writeLoginInput } from "./agents/auth";
+import { claudeAuthStatus, claudeLogin, codexAuthStatus, codexLogin, writeLoginInput, type AuthStatus } from "./agents/auth";
+import { subscriptionVerdict } from "./agents/billing";
 import { pickBinary } from "./agents/binaries";
 import { READ_ONLY_TOOLS } from "./agents/prompt";
 import { ClaudeSession, listClaudeSessions, loadClaudeHistory } from "./agents/claude";
 import { CodexSession, listCodexSessions } from "./agents/codex";
 import { Annotations } from "./annotations";
 import { integrateDesktop } from "./desktopIntegration";
-import { KicadBridge, setupBridge } from "./kicad/bridge";
+import { KicadBridge, sameFile, setupBridge } from "./kicad/bridge";
 import { detectKicad, openInKicad } from "./kicad/cli";
 import { McpHub } from "./mcpHub";
 import { KicadProject, resolveProject } from "./project";
@@ -76,7 +77,7 @@ let kicadSelecting = false; // selection that came from KiCad must not be sent b
 
 function liveStatus() {
   const pcb = project?.info.pcb;
-  return { ...bridge.status, matches: !!pcb && (bridge.status.boards ?? []).some((b) => b.split(/[\\/]/).pop() === pcb) };
+  return { ...bridge.status, matches: !!pcb && (bridge.status.boards ?? []).some((b) => sameFile(b, project!.abs(pcb))) };
 }
 const snapshotWaiters = new Map<string, { resolve: (u: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
 
@@ -139,6 +140,21 @@ function stopAgent(): void {
   agent = null;
 }
 
+// Subscription check before every session and turn (cached briefly; any login change clears it).
+const authCache = new Map<string, { at: number; status: AuthStatus }>();
+async function requireSubscription(kind: AgentKind, binPath: string): Promise<string | null> {
+  const key = `${kind}|${binPath}`;
+  let c = authCache.get(key);
+  if (!c || Date.now() - c.at > 5 * 60 * 1000) {
+    const status = kind === "claude" ? await claudeAuthStatus(binPath) : await codexAuthStatus(binPath, project?.dir ?? app.getPath("home"));
+    c = { at: Date.now(), status };
+    authCache.set(key, c);
+  }
+  const v = subscriptionVerdict(kind, c.status);
+  if (!v.ok) authCache.delete(key); // re-read next time (the user may fix the login meanwhile)
+  return v.ok ? null : v.error;
+}
+
 async function startAgent(kind: AgentKind, resumeId?: string): Promise<{ ok: boolean; error?: string; binary?: string; version?: string }> {
   if (!project) return { ok: false, error: "Open a KiCad project first." };
   stopAgent();
@@ -149,6 +165,8 @@ async function startAgent(kind: AgentKind, resumeId?: string): Promise<{ ok: boo
       ? "Claude Code was not found. Install the Claude Code VS Code extension or CLI, or set its path in Settings > Agents."
       : "Codex was not found. Install the ChatGPT/Codex VS Code extension or the codex CLI, or set its path in Settings > Agents." };
   }
+  const refused = await requireSubscription(kind, bin.path);
+  if (refused) return { ok: false, error: refused };
   setSettings({ lastAgent: kind });
   const a: AgentSession = kind === "claude" ? new ClaudeSession() : new CodexSession();
   agent = a;
@@ -257,7 +275,7 @@ function registerIpc(): void {
   ipcMain.handle("live:select", async (_e, refs: string[]) => {
     const st = liveStatus();
     if (!getSettings().syncSelection || !st.connected || !st.matches || kicadSelecting) return false;
-    try { await bridge.request("select", { refs, board: project?.info.pcb }); return true; } catch { return false; }
+    try { await bridge.request("select", { refs, board: project?.info.pcb ? project.abs(project.info.pcb) : undefined }); return true; } catch { return false; }
   });
 
   ipcMain.handle("compare:folder", async () => {
@@ -277,14 +295,14 @@ function registerIpc(): void {
   ipcMain.handle("release:profiles", () => PROFILES.map((p) => ({ id: p.id, name: p.name, note: p.note, caps: p.caps ?? {} })));
   ipcMain.handle("rules:list", () => {
     if (!project) return null;
-    const { file, data } = project.rulesData();
-    return { file, writePath: project.rulesWritePath(), rules: data.rules.map((r) => ({ ...r, text: describeRule(r) })), report: project.design.rules };
+    const { file, data, error } = project.rulesData();
+    return { file, error, writePath: project.rulesWritePath(), rules: data.rules.map((r) => ({ ...r, text: describeRule(r) })), report: project.design.rules };
   });
   ipcMain.handle("rules:add", (_e, r) => {
     if (!project) return null;
     try { const rule = project.addRule(r); project.refreshRules(); return { ok: true, rule }; } catch (e: any) { return { ok: false, error: e?.message ?? String(e) }; }
   });
-  ipcMain.handle("rules:remove", (_e, id: string) => { if (!project) return false; const ok = project.removeRule(id); project.refreshRules(); return ok; });
+  ipcMain.handle("rules:remove", (_e, id: string) => { if (!project) return false; try { const ok = project.removeRule(id); project.refreshRules(); return ok; } catch { return false; } });
   ipcMain.handle("polarity:list", () => project?.polarity() ?? []);
   ipcMain.handle("parts:list", () => (project ? { lines: project.partLines(), file: project.partsData().file } : null));
   ipcMain.handle("parts:set", (_e, keyOrRef: string, note: Record<string, unknown> | null) => { // the UI always sends the whole note
@@ -298,7 +316,7 @@ function registerIpc(): void {
     for (const sym of project.design.schematic?.symbols ?? []) { const m = pins.get(sym.ref) ?? new Map(); for (const q of sym.pins) if (q.name && q.name !== "~") m.set(q.num, q.name); pins.set(sym.ref, m); }
     return { metrics: layoutMetrics(b), viaPaste: viasAtPaste(b), decoupling: decoupling(b, pins), testPads: testAccess(b), duplicateUuids: project.duplicateUuidCount(), mask: maskReport(project, profile) };
   });
-  ipcMain.handle("polarity:verify", (_e, ref: string, fingerprint: string | null) => project?.setPolarityVerified(ref, fingerprint) ?? []);
+  ipcMain.handle("polarity:verify", (_e, ref: string, fingerprint: string | null) => { try { return project?.setPolarityVerified(ref, fingerprint) ?? []; } catch { return project?.polarity() ?? []; } });
   ipcMain.handle("release:preflight", (_e, profile: string, fresh?: boolean) => (project ? runPreflight(project, profile, !!fresh) : null));
   ipcMain.handle("release:list", () => (project ? listPackages(project) : []));
   ipcMain.handle("release:export", async (_e, profile: string, choose?: boolean, opts?: { step?: boolean }) => {
@@ -329,6 +347,10 @@ function registerIpc(): void {
       const r = await startAgent(getSettings().lastAgent);
       if (!r.ok) throw new Error(r.error);
     }
+    const s = getSettings();
+    const bin = pickBinary(agent!.kind, agent!.kind === "claude" ? s.claudePath : s.codexPath);
+    const refused = bin ? await requireSubscription(agent!.kind, bin.path) : "The agent binary is no longer available.";
+    if (refused) { stopAgent(); throw new Error(refused); }
     send("agent:event", agent!.kind, { type: "user", id: `u${Date.now()}`, text, ts: Date.now() } satisfies AgentEvent);
     await agent!.send(text);
     return true;
@@ -340,6 +362,7 @@ function registerIpc(): void {
     const s = getSettings();
     const bin = pickBinary(kind, kind === "claude" ? s.claudePath : s.codexPath);
     if (!bin) return { loggedIn: false, error: "not installed" };
+    authCache.clear();
     return kind === "claude" ? claudeAuthStatus(bin.path) : codexAuthStatus(bin.path, project?.dir ?? app.getPath("home"));
   });
   ipcMain.handle("agent:login", async (_e, kind: AgentKind) => {
@@ -348,6 +371,7 @@ function registerIpc(): void {
     if (!bin) return { loggedIn: false, error: "not installed" };
     const line = (l: string) => send("agent:login-output", kind, l);
     const r = kind === "claude" ? await claudeLogin(bin.path, line) : await codexLogin(bin.path, project?.dir ?? app.getPath("home"), line);
+    authCache.clear();
     send("agent:auth-changed", kind, r);
     return r;
   });
@@ -392,7 +416,7 @@ app.whenReady().then(async () => {
   });
   bridge.on("status", () => send("live:status", liveStatus()));
   bridge.on("selection", (m: { board: string; refs: string[]; nets: string[] }) => {
-    if (!getSettings().syncSelection || !project?.info.pcb || (m.board ?? "").split(/[\\/]/).pop() !== project.info.pcb) return;
+    if (!getSettings().syncSelection || !project?.info.pcb || !sameFile(m.board ?? "", project.abs(project.info.pcb))) return;
     kicadSelecting = true;
     send("live:selection", { refs: m.refs, nets: m.nets });
     setTimeout(() => { kicadSelecting = false; }, 800);

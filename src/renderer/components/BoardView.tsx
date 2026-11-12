@@ -44,7 +44,7 @@ export function BoardView(p: Props) {
     if (!d || !p.board) return null;
     const box = new Map(p.board.footprints.map((f) => [f.ref, f.bbox]));
     const get = (r: string) => box.get(r);
-    const changedRefs = new Set([...d.value, ...d.footprint, ...d.fields, ...d.padNets, ...d.rotated].map((c) => c.ref).concat(d.flipped));
+    const changedRefs = new Set([...d.value, ...d.footprint, ...d.fields, ...d.padNets, ...d.rotated, ...(d.attrs ?? []), ...(d.pads ?? [])].map((c) => c.ref).concat(d.flipped));
     const movedRefs = new Set(d.moved.map((m) => m.ref));
     return {
       moved: d.moved.flatMap((m) => { const b = get(m.ref); return b ? [{ box: b, dx: m.dx, dy: m.dy }] : []; }),

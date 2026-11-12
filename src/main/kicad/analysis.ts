@@ -247,20 +247,34 @@ export function hintsText(v: ViaPasteIssue[], dc: DecouplingHint[], tp: TestPadH
 
 // ---------------------------------------------------------------- solder-mask webs
 
-/** Sample points on a pad's copper outline (circle pads are sampled). */
-function outline(p: Pad): number[] {
+/** A pad's copper outlines, one closed polygon each (circles sampled with 32 points: error ≤ 0.5 % of r). */
+function outline(p: Pad): number[][] {
   if (p.r !== undefined) {
     const o: number[] = [];
     for (let k = 0; k < 32; k++) o.push(p.x + p.r * Math.cos((k / 32) * 2 * Math.PI), p.y + p.r * Math.sin((k / 32) * 2 * Math.PI));
-    return o;
+    return [o];
   }
-  return (p.polys ?? []).flat();
+  return (p.polys ?? []).filter((q) => q.length >= 6);
 }
-/** Copper-to-copper distance of two pads (0 when they touch or overlap). Exact for convex outlines. */
+function segsCross(ax: number, ay: number, bx: number, by: number, cx: number, cy: number, dx: number, dy: number): boolean {
+  const o = (px: number, py: number, qx: number, qy: number, rx: number, ry: number) => Math.sign((qx - px) * (ry - py) - (qy - py) * (rx - px));
+  const o1 = o(ax, ay, bx, by, cx, cy), o2 = o(ax, ay, bx, by, dx, dy), o3 = o(cx, cy, dx, dy, ax, ay), o4 = o(cx, cy, dx, dy, bx, by);
+  return o1 !== o2 && o3 !== o4 && o1 !== 0 && o2 !== 0 && o3 !== 0 && o4 !== 0;
+}
+/**
+ * Copper-to-copper distance of two pads (0 when they touch, overlap or cross). Edges that cross are
+ * detected explicitly; otherwise the minimum is the distance of a vertex of one outline to the other
+ * outline, which is exact for polygons (and for sampled circles within the sampling error).
+ */
 export function padGap(a: Pad, b: Pad, oa = outline(a), ob = outline(b)): number {
+  for (const pa of oa) for (const pb of ob) {
+    for (let i = 0, j = pa.length - 2; i < pa.length; j = i, i += 2)
+      for (let k = 0, l = pb.length - 2; k < pb.length; l = k, k += 2)
+        if (segsCross(pa[j], pa[j + 1], pa[i], pa[i + 1], pb[l], pb[l + 1], pb[k], pb[k + 1])) return 0;
+  }
   let d = Infinity;
-  for (let i = 0; i < oa.length && d > 0; i += 2) d = Math.min(d, padDistance(b, oa[i], oa[i + 1]));
-  for (let i = 0; i < ob.length && d > 0; i += 2) d = Math.min(d, padDistance(a, ob[i], ob[i + 1]));
+  for (const pa of oa) for (let i = 0; i < pa.length && d > 0; i += 2) d = Math.min(d, padDistance(b, pa[i], pa[i + 1]));
+  for (const pb of ob) for (let i = 0; i < pb.length && d > 0; i += 2) d = Math.min(d, padDistance(a, pb[i], pb[i + 1]));
   return d;
 }
 
@@ -291,14 +305,14 @@ export interface MaskReport {
 export function maskWebs(b: BoardModel, minWeb?: number, source?: string, opts: { viasOpen?: boolean } = {}): MaskReport {
   const setup = b.mask ?? { padToMask: 0, minWidth: 0, bridgesInFootprints: false };
   const thr = minWeb ?? 0.1;
-  type Op = { f: Footprint | null; p: Pad; label: string; side: "F" | "B"; m: number; o: number[]; box: [number, number, number, number] };
+  type Op = { f: Footprint | null; p: Pad; label: string; side: "F" | "B"; m: number; o: number[][]; box: [number, number, number, number] };
   const ops: Op[] = [];
   const md = new Map<string, { pads: number; margin: number }>();
   const push = (f: Footprint | null, p: Pad, label: string, side: "F" | "B", m: number) => {
     const o = outline(p);
     if (!o.length) return;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (let i = 0; i < o.length; i += 2) { x0 = Math.min(x0, o[i]); x1 = Math.max(x1, o[i]); y0 = Math.min(y0, o[i + 1]); y1 = Math.max(y1, o[i + 1]); }
+    for (const q of o) for (let i = 0; i < q.length; i += 2) { x0 = Math.min(x0, q[i]); x1 = Math.max(x1, q[i]); y0 = Math.min(y0, q[i + 1]); y1 = Math.max(y1, q[i + 1]); }
     ops.push({ f, p, label, side, m, o, box: [x0 - m, y0 - m, x1 + m, y1 + m] });
   };
   for (const f of b.footprints) for (const p of f.pads) {

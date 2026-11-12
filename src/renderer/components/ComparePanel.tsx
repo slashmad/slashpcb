@@ -15,6 +15,7 @@ export interface RevisionDiff {
     rotated: { ref: string; from: number; to: number }[]; flipped: string[];
     value: { ref: string; from: string; to: string }[]; footprint: { ref: string; from: string; to: string }[];
     fields: { ref: string; field: string; from: string; to: string }[]; padNets: { ref: string; pad: string; from: string; to: string }[];
+    attrs?: { ref: string; from: string; to: string }[]; pads?: { ref: string; pad: string; change: string; detail: string }[]; board?: string[];
     netsAdded: string[]; netsRemoved: string[];
     before: Totals;
     after: Totals;
@@ -67,6 +68,9 @@ export function ComparePanel({ diff, onDiff, onPickRef }: { diff: RevisionDiff |
               <Section title={t("cmp.value")} n={b.value.length} open>{b.value.map((c) => <div key={c.ref} className="cmp-row">{ref(c.ref)} <span className="small">{c.from} → <b>{c.to}</b></span></div>)}</Section>
               <Section title={t("cmp.footprint")} n={b.footprint.length}>{b.footprint.map((c) => <div key={c.ref} className="cmp-row">{ref(c.ref)} <span className="small">{c.from} → <b>{c.to}</b></span></div>)}</Section>
               <Section title={t("cmp.padNets")} n={b.padNets.length}>{b.padNets.slice(0, 500).map((c, i) => <div key={i} className="cmp-row">{ref(c.ref)} <span className="small">{t("board.pad")} {c.pad}: {c.from || "–"} → <b>{c.to || "–"}</b></span></div>)}</Section>
+              <Section title={t("cmp.attrs")} n={b.attrs?.length ?? 0} open>{(b.attrs ?? []).map((c) => <div key={c.ref} className="cmp-row">{ref(c.ref)} <span className="small">{c.from} → <b>{c.to}</b></span></div>)}</Section>
+              <Section title={t("cmp.pads")} n={b.pads?.length ?? 0} open>{(b.pads ?? []).slice(0, 300).map((c, i) => <div key={i} className={`cmp-row ${c.change === "added" ? "add" : c.change === "removed" ? "del" : ""}`}>{ref(c.ref)} <span className="small">{t("board.pad")} {c.pad} · {c.change}: <span className="muted">{c.detail}</span></span></div>)}</Section>
+              <Section title={t("cmp.boardItems")} n={b.board?.length ?? 0} open>{(b.board ?? []).map((x, i) => <div key={i} className="cmp-row small">{x}</div>)}</Section>
               <Section title={t("cmp.fields")} n={b.fields.length}>{b.fields.slice(0, 500).map((c, i) => <div key={i} className="cmp-row">{ref(c.ref)} <span className="small">{c.field}: “{c.from}” → <b>“{c.to}”</b></span></div>)}</Section>
               <Section title={t("cmp.nets")} n={b.netsAdded.length + b.netsRemoved.length}>
                 {b.netsAdded.map((n) => <div key={"a" + n} className="cmp-row small add">+ {n}</div>)}
@@ -86,7 +90,7 @@ export function ComparePanel({ diff, onDiff, onPickRef }: { diff: RevisionDiff |
           )}
           {diff.rules && diff.rules.length > 0 && (
             <Section title={t("cmp.rules")} n={diff.rules.length} open>
-              {diff.rules.map((c, i) => <div key={i} className={`cmp-row small ${/relaxed|ignored|exclusion\+|custom/.test(c.kind) ? "del" : ""}`}>{c.kind} {c.what}{c.from !== undefined || c.to !== undefined ? `: ${c.from ?? ""} → ${c.to ?? ""}` : ""}</div>)}
+              {diff.rules.map((c, i) => <div key={i} className={`cmp-row small ${/relaxed|removed|class-|ignored|exclusion\+|custom/.test(c.kind) ? "del" : ""}`}>{c.kind} {c.what}{c.from !== undefined || c.to !== undefined ? `: ${c.from ?? ""} → ${c.to ?? ""}` : ""}</div>)}
             </Section>
           )}
           {s && (s.added.length + s.removed.length + s.value.length + s.footprint.length + s.fields.length > 0) && (
@@ -99,7 +103,8 @@ export function ComparePanel({ diff, onDiff, onPickRef }: { diff: RevisionDiff |
               <Section title={t("cmp.fields")} n={s.fields.length}>{s.fields.slice(0, 500).map((c, i) => <div key={i} className="cmp-row">{ref(c.ref)} <span className="small">{c.field}: “{c.from}” → <b>“{c.to}”</b></span></div>)}</Section>
             </>
           )}
-          {b && !b.added.length && !b.removed.length && !b.moved.length && !b.rotated.length && !b.value.length && !b.footprint.length && !b.fields.length && !b.padNets.length && <div className="ok pad small">✓ {t("cmp.same")}</div>}
+          {b && !b.added.length && !b.removed.length && !b.moved.length && !b.rotated.length && !b.value.length && !b.footprint.length && !b.fields.length && !b.padNets.length && !b.attrs?.length && !b.pads?.length && !b.board?.length && <div className="ok pad small">✓ {t("cmp.same")}</div>}
+          {b && <div className="muted small pad-x">{t("cmp.notCompared")}</div>}
         </div>
       )}
     </div>

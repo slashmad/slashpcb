@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Footprint } from "../../shared/types";
 import { child, children, isList, num, parseSexpr, str, type SList } from "./sexpr";
 
-export interface LibPad { num: string; x: number; y: number; w: number; h: number; rot: number; type: string }
+export interface LibPad { num: string; x: number; y: number; w: number; h: number; rot: number; type: string; shape?: string; drill?: number }
 
 /** KiCad's shared data folder (footprints, templates) for the detected kicad-cli. */
 function kicadShare(cli: string | null): string[] {
@@ -59,8 +59,10 @@ export function readKicadMod(file: string): LibPad[] | null {
     const root = parseSexpr(readFileSync(file, "utf8"))[0] as SList;
     if (!isList(root) || (root[0] !== "footprint" && root[0] !== "module")) return null;
     return children(root, "pad").map((p) => {
-      const at = child(p, "at"), size = child(p, "size");
-      return { num: String(p[1] ?? ""), type: String(p[2] ?? ""), x: Number(at?.[1] ?? 0), y: Number(at?.[2] ?? 0), rot: Number(at?.[3] ?? 0), w: Number(size?.[1] ?? 0), h: Number(size?.[2] ?? size?.[1] ?? 0) };
+      const at = child(p, "at"), size = child(p, "size"), drill = child(p, "drill");
+      const d = (drill ?? []).slice(1).filter((v): v is number => typeof v === "number");
+      return { num: String(p[1] ?? ""), type: String(p[2] ?? ""), shape: String(p[3] ?? ""), x: Number(at?.[1] ?? 0), y: Number(at?.[2] ?? 0), rot: Number(at?.[3] ?? 0),
+        w: Number(size?.[1] ?? 0), h: Number(size?.[2] ?? size?.[1] ?? 0), drill: d.length ? Math.max(...d) : undefined };
     });
   } catch { return null; }
 }
@@ -81,11 +83,11 @@ export function loadReference(ref: string, libs: Map<string, string>, projectDir
 }
 
 /** Board pads back in footprint-local coordinates (inverse of the placement transform). */
-export function localPads(f: Footprint): { num: string; x: number; y: number }[] {
+export function localPads(f: Footprint): { num: string; x: number; y: number; w: number; h: number; type: string; shape: string; drill?: number }[] {
   const a = (f.rot * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
   return f.pads.filter((p) => p.num).map((p) => {
     const dx = p.x - f.x, dy = p.y - f.y;
-    return { num: p.num, x: c * dx - s * dy, y: s * dx + c * dy };
+    return { num: p.num, x: c * dx - s * dy, y: s * dx + c * dy, w: p.w, h: p.h, type: p.type, shape: p.shape, drill: p.drill };
   });
 }
 
@@ -93,37 +95,62 @@ export interface FootprintCompare {
   status: "match" | "numbering" | "geometry" | "unflipped" | "no-reference";
   detail: string;
   swaps?: string[]; // "board pad 1 sits where the reference has pad 10"
+  differences?: string[]; // missing/extra pads and per-pad attribute differences
+  compared: string; // what a "match" covers
 }
 
-/** Compare a placed footprint with reference pads (front-side library geometry). */
+const COMPARED = "pad count, positions, numbering, size, shape, type and drill; mask/paste apertures and custom-pad outlines are not compared";
+
+/**
+ * Strict comparison of a placed footprint with reference pads (front-side library geometry): every
+ * pad must have exactly one counterpart in both directions (duplicate pad numbers kept), with the
+ * same number, size, shape, type and drill. Anything less is not a match.
+ */
 export function compareWithReference(f: Footprint, ref: LibPad[], tol = 0.02): FootprintCompare {
   const board = localPads(f);
   const refNum = ref.filter((p) => p.num);
-  if (!board.length || !refNum.length) return { status: "no-reference", detail: "no numbered pads to compare" };
+  if (!board.length || !refNum.length) return { status: "no-reference", detail: "no numbered pads to compare", compared: COMPARED };
   // Bottom-side parts are stored flipped: try both mirror axes and also "not flipped".
   const variants: { name: string; m: (x: number, y: number) => [number, number] }[] = f.side === "B"
     ? [{ name: "flip-y", m: (x, y) => [x, -y] }, { name: "flip-x", m: (x, y) => [-x, y] }, { name: "unflipped", m: (x, y) => [x, y] }]
     : [{ name: "front", m: (x, y) => [x, y] }];
-  let best: { name: string; pos: number; numOk: number; swaps: string[] } | null = null;
+  type Pair = { b: (typeof board)[number]; r: LibPad };
+  let best: { name: string; pos: number; numOk: number; swaps: string[]; pairs: Pair[] } | null = null;
   for (const v of variants) {
-    const mapped = refNum.map((p) => { const [x, y] = v.m(p.x, p.y); return { num: p.num, x, y }; });
+    const mapped = refNum.map((p) => { const [x, y] = v.m(p.x, p.y); return { ...p, x, y }; });
     let pos = 0, numOk = 0;
-    const swaps: string[] = [];
+    const swaps: string[] = [], pairs: Pair[] = [];
     const used = new Set<number>();
     for (const b of board) {
       let bi = -1, bd = Infinity;
-      mapped.forEach((m, i) => { if (used.has(i)) return; const d = Math.hypot(m.x - b.x, m.y - b.y); if (d < bd) { bd = d; bi = i; } });
+      mapped.forEach((m, i) => { if (used.has(i)) return; const d = Math.hypot(m.x - b.x, m.y - b.y); if (d < bd || (d === bd && m.num === b.num)) { bd = d; bi = i; } });
       if (bi < 0 || bd > tol) continue;
       used.add(bi);
       pos++;
+      pairs.push({ b, r: mapped[bi] });
       if (mapped[bi].num === b.num) numOk++; else swaps.push(`pad ${b.num} sits where the reference has pad ${mapped[bi].num}`);
     }
-    if (!best || pos > best.pos || (pos === best.pos && numOk > best.numOk)) best = { name: v.name, pos, numOk, swaps };
+    if (!best || pos > best.pos || (pos === best.pos && numOk > best.numOk)) best = { name: v.name, pos, numOk, swaps, pairs };
   }
   const b = best!;
   const n = Math.max(board.length, refNum.length);
-  if (b.pos < Math.max(1, Math.floor(n * 0.8))) return { status: "geometry", detail: `pad positions differ from the reference (${b.pos} of ${n} pads coincide)` };
-  if (b.numOk < b.pos) return { status: "numbering", detail: `same land pattern, different pad numbering (${b.pos - b.numOk} of ${b.pos} pads)`, swaps: b.swaps.slice(0, 20) };
-  if (b.name === "unflipped") return { status: "unflipped", detail: "bottom-side copy that is not mirrored" };
-  return { status: "match", detail: `matches the reference (${b.pos} pads)` };
+  if (b.pos < Math.max(1, Math.floor(n * 0.8))) return { status: "geometry", detail: `pad positions differ from the reference (${b.pos} of ${n} pads coincide)`, compared: COMPARED };
+  if (b.numOk < b.pos) return { status: "numbering", detail: `same land pattern, different pad numbering (${b.pos - b.numOk} of ${b.pos} pads)`, swaps: b.swaps.slice(0, 20), compared: COMPARED };
+  if (b.name === "unflipped") return { status: "unflipped", detail: "bottom-side copy that is not mirrored", compared: COMPARED };
+  const diffs: string[] = [];
+  if (board.length !== refNum.length || b.pos !== board.length) {
+    diffs.push(`${board.length} board pads vs ${refNum.length} reference pads, ${b.pos} with a counterpart`);
+    const matched = new Set(b.pairs.map((p) => p.b));
+    for (const p of board) if (!matched.has(p)) diffs.push(`board pad ${p.num} has no counterpart`);
+  }
+  const near = (x: number, y: number) => Math.abs(x - y) <= 0.005;
+  for (const { b: p, r } of b.pairs) {
+    const [bw, bh] = [Math.min(p.w, p.h), Math.max(p.w, p.h)], [rw, rh] = [Math.min(r.w, r.h), Math.max(r.w, r.h)];
+    if (!near(bw, rw) || !near(bh, rh)) diffs.push(`pad ${p.num} size ${p.w}×${p.h} vs ${r.w}×${r.h}`);
+    if (r.shape && p.shape !== r.shape) diffs.push(`pad ${p.num} shape ${p.shape} vs ${r.shape}`);
+    if (r.type && p.type !== r.type) diffs.push(`pad ${p.num} type ${p.type} vs ${r.type}`);
+    if ((p.drill ?? 0) !== (r.drill ?? 0) && !near(p.drill ?? 0, r.drill ?? 0)) diffs.push(`pad ${p.num} drill ${p.drill ?? "none"} vs ${r.drill ?? "none"}`);
+  }
+  if (diffs.length) return { status: "geometry", detail: `differs from the reference: ${diffs.slice(0, 4).join("; ")}${diffs.length > 4 ? ` (+${diffs.length - 4} more)` : ""}`, differences: diffs.slice(0, 50), compared: COMPARED };
+  return { status: "match", detail: `matches the reference (${b.pos} pads; ${COMPARED})`, compared: COMPARED };
 }
